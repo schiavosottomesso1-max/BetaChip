@@ -33,7 +33,7 @@ class decorator:
         self.strength = settings['strength']
 
     def short_name( self ):
-        return 'window'
+        return 'spotlight'
 
     def short_desc( self ):
         return '%d classes, dark %d, strength %d'%(len(self.classes),self.dark,self.strength )
@@ -49,7 +49,7 @@ class decorator:
         self.dark_entry.insert(0,str(self.dark))
         self.dark_entry.grid(row=0,column=1)
         
-        tk.Label( frame, text="strength (1-50)").grid(row=1,column=0)
+        tk.Label( frame, text="Strength (1-50)").grid(row=1,column=0)
         self.strength_entry = tk.Entry( frame, textvariable=self.strength_var )
         self.strength_entry.delete(0,tk.END)
         self.strength_entry.insert(0,str(self.strength))
