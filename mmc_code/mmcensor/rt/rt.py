@@ -736,7 +736,12 @@ class mmc_realtime:
             for hwnd in img_buffer[-1][1]: # the list of things to show is whatever the *latest* list of captured coordinates is
                 self.profiler.mark( 'pre_full' )
                 new_xyxy = img_buffer[-1][1][hwnd][1]
-                self.to_show[ hwnd ] = np.full( (new_xyxy[3]-new_xyxy[1], new_xyxy[2]-new_xyxy[0], 3 ), 127, dtype=np.uint8 )
+                _h = new_xyxy[3]-new_xyxy[1]
+                _w = new_xyxy[2]-new_xyxy[0]
+                if hwnd not in self.to_show or self.to_show[hwnd] is None or self.to_show[hwnd].shape[:2] != (_h, _w):
+                    self.to_show[hwnd] = np.full( (_h, _w, 3), 127, dtype=np.uint8 )
+                else:
+                    self.to_show[hwnd].fill( 127 )
                 self.profiler.mark( 'post_full' )
 
                 if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0]:
@@ -756,9 +761,9 @@ class mmc_realtime:
                     # you could do this faster by intersecting with window size as you
                     # go, but it's really annoying
                     # this probably isn't that slow
-                    relevant_boxes = self.boxes[self.boxes_hwnd_index[hwnd]][0:last_box_index+1].copy()
-                    relevant_boxes = relevant_boxes[np.less(relevant_boxes[:,2],min_w )] #discard boxes that start to the right of min_w
-                    relevant_boxes = relevant_boxes[np.less(relevant_boxes[:,3],min_h )]
+                    _src = self.boxes[self.boxes_hwnd_index[hwnd]][0:last_box_index+1]
+                    _mask = (_src[:,2] < min_w) & (_src[:,3] < min_h)
+                    relevant_boxes = _src[_mask]
                     relevant_boxes[:,4]=np.fmin(relevant_boxes[:,4],min_w)
                     relevant_boxes[:,5]=np.fmin(relevant_boxes[:,5],min_h)
 
