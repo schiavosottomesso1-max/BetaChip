@@ -19,15 +19,33 @@ class mmc_gui:
         ##########################
         self.root = tk.Tk()
         self.root.protocol( "WM_DELETE_WINDOW", self.on_close )
-        self.root.geometry( "800x800" )
+        self.root.geometry( "800x900" )
+        self.root.configure( bg="#FFF0F5" )
 
-        self.save_button = tk.Button( self.root, text= "Save", command = self.save_pushed )
-        self.save_as_button = tk.Button( self.root, text = "Save As (not yet implemented)" )
-        self.load_button = tk.Button( self.root, text = "Load", command=self.load_pushed )
+        # Hero header: large "BETA CHIP" title with glow effect
+        self.title_canvas = tk.Canvas( self.root, width=800, height=90, bg="#FFF0F5", highlightthickness=0 )
+        self.title_canvas.grid( row=0, column=0, columnspan=4 )
+        # Draw glow/shadow layers (offset copies in rose-gold)
+        for dx, dy in [(-2,-2),(2,-2),(-2,2),(2,2),(0,-3),(0,3),(-3,0),(3,0)]:
+            self.title_canvas.create_text( 400+dx, 48+dy, text="✨ BETA CHIP ✨",
+                font=("Arial", 46, "bold"), fill="#B76E79", anchor="center" )
+        # Draw main title in hot pink
+        self.title_canvas.create_text( 400, 48, text="✨ BETA CHIP ✨",
+            font=("Arial", 46, "bold"), fill="#FF69B4", anchor="center" )
 
-        self.save_button.grid( row=0, column = 0 )
-        self.save_as_button.grid( row=0, column=1 )
-        self.load_button.grid( row = 0, column = 2 )
+        self.save_button = tk.Button( self.root, text= "Save", command = self.save_pushed,
+            bg="#FF69B4", fg="white", relief="flat", font=("Arial", 10, "bold"),
+            padx=10, pady=4, bd=0, cursor="hand2" )
+        self.save_as_button = tk.Button( self.root, text = "Save As (not yet implemented)",
+            bg="#FF69B4", fg="white", relief="flat", font=("Arial", 10, "bold"),
+            padx=10, pady=4, bd=0 )
+        self.load_button = tk.Button( self.root, text = "Load", command=self.load_pushed,
+            bg="#FF69B4", fg="white", relief="flat", font=("Arial", 10, "bold"),
+            padx=10, pady=4, bd=0, cursor="hand2" )
+
+        self.save_button.grid( row=1, column = 0, padx=4, pady=4 )
+        self.save_as_button.grid( row=1, column=1, padx=4, pady=4 )
+        self.load_button.grid( row=1, column = 2, padx=4, pady=4 )
 
         tab_parent = ttk.Notebook( self.root )
         self.tab_decorate = ttk.Frame( tab_parent )
@@ -35,7 +53,7 @@ class mmc_gui:
         
         tab_parent.add( self.tab_decorate, text="Decorators" )
         tab_parent.add( self.tab_realtime, text="Realtime" )
-        tab_parent.grid( row = 1, column = 0, columnspan = 4 )
+        tab_parent.grid( row = 2, column = 0, columnspan = 4 )
 
         #############################
         ## make realtime tab
