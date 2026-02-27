@@ -28,3 +28,17 @@ if not exist .\neuralnet_models\640m.pt (
 	exit 2
 )
 
+REM -- Download ffmpeg if not already present (needed for audio+video recording) --------
+if not exist .\tools\ffmpeg.exe (
+	echo.
+	echo Downloading ffmpeg for audio+video recording support...
+	if not exist .\tools mkdir tools
+	powershell -Command "Invoke-WebRequest -Uri 'https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip' -OutFile ffmpeg-dl.zip"
+	powershell -Command "Expand-Archive -Path ffmpeg-dl.zip -DestinationPath ffmpeg-dl-tmp -Force"
+	powershell -Command "$src = Get-ChildItem 'ffmpeg-dl-tmp\*\bin\ffmpeg.exe' | Select-Object -First 1; if ($src) { Copy-Item $src.FullName 'tools\ffmpeg.exe' } else { Write-Error 'ffmpeg.exe not found in downloaded archive' }"
+	rmdir /s /q ffmpeg-dl-tmp
+	del ffmpeg-dl.zip
+	echo ffmpeg.exe downloaded to tools\ffmpeg.exe
+	echo.
+)
+

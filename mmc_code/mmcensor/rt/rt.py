@@ -533,13 +533,20 @@ class mmc_realtime:
         except Exception as exc:
             print( 'WARNING: audio recording failed: %s' % exc )
 
+    # Path to the bundled ffmpeg downloaded by check-prereqs.bat during setup.
+    # Falls back to whatever 'ffmpeg' is on the system PATH.
+    _FFMPEG_BUNDLED = os.path.normpath(
+        os.path.join( os.path.dirname( os.path.abspath(__file__) ),
+                      '..', '..', '..', 'tools', 'ffmpeg.exe' ) )
+
     def _mux_audio_into_video( self, video_path, audio_path ):
         """Use ffmpeg to mux audio_path into video_path, replacing the file in-place."""
+        ffmpeg = self._FFMPEG_BUNDLED if os.path.isfile( self._FFMPEG_BUNDLED ) else 'ffmpeg'
         base, ext = os.path.splitext( video_path )
         tmp_out   = base + '_withaudio' + ext
         try:
             result = subprocess.run(
-                [ 'ffmpeg', '-y',
+                [ ffmpeg, '-y',
                   '-i', video_path,
                   '-i', audio_path,
                   '-c:v', 'copy', '-c:a', 'aac', '-shortest',
@@ -555,7 +562,7 @@ class mmc_realtime:
                 try: os.unlink( tmp_out )
                 except OSError: pass
         except FileNotFoundError:
-            print( 'WARNING: ffmpeg not found in PATH; video saved without audio' )
+            print( 'WARNING: ffmpeg not found; video saved without audio' )
         except subprocess.TimeoutExpired:
             print( 'WARNING: ffmpeg mux timed out; video saved without audio' )
             try: os.unlink( tmp_out )
