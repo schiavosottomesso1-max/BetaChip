@@ -13,6 +13,9 @@ import os
 import sys
 import copy
 import importlib
+import subprocess
+import tempfile
+import wave
 from functools import partial
 import mmcensor.config as mmc_config
 import mmcensor.nn as nn
@@ -212,14 +215,14 @@ class mmc_detect_loop_class:
         self.models = {}
         for size in mmc_const.supported_sizes:
             if self.env == 'openvino':
-                model = YOLO( "../neuralnet_models/640m_openvino_model" )
+                model = YOLO( "../neuralnet_models/640m_openvino_model", task='detect' )
             elif self.env == 'directml':
                 onnx_path = "../neuralnet_models/640m.onnx"
-                model = YOLO( onnx_path )
+                model = YOLO( onnx_path, task='detect' )
             elif self.env == 'tensorrt':
                 engine_path = "../neuralnet_models/640m-%d.engine"%size
                 if os.path.isfile( engine_path ):
-                    model = YOLO( engine_path )
+                    model = YOLO( engine_path, task='detect' )
                 else:
                     model = None
             # tested this on 20240813
@@ -233,7 +236,7 @@ class mmc_detect_loop_class:
                 #else:
                     #model = None
             else:
-                model = YOLO( "../neuralnet_models/640m.pt" )
+                model = YOLO( "../neuralnet_models/640m.pt", task='detect' )
 
             if model is not None:
                 self.models[size] = model
@@ -446,11 +449,149 @@ class mmc_realtime:
         self.off_gray_callback = None
         self.gray_state = False
 
+        self.recording = False
+        self.video_writers = {}      # hwnd -> cv2.VideoWriter
+        self.video_writer_dims = {}  # hwnd -> (w, h); VideoWriter.get(CAP_PROP_FRAME_WIDTH/HEIGHT) returns 0, so stored separately
+        self.recording_path = None
+        self._rec_hwnd_paths = {}    # hwnd -> file path (set at writer-creation time)
+        self._rec_next_idx = 0       # stable counter for multi-window filename suffixes
+        self._audio_thread   = None  # background thread capturing WASAPI loopback audio
+        self._audio_tmp_path = None  # temp WAV file path written by _audio_thread
+
     def take_screenshot( self ):
         for hwnd in self.to_show:
             if self.to_show[hwnd] is not None:
                 now = datetime.today().strftime('%Y%m%d%H%M%S%f')
                 cv2.imwrite( '../screenshots/%s.jpg'%now, self.to_show[hwnd] )
+
+    def start_recording( self, path ):
+        """Begin recording censored output.  Writers are created lazily on the first frame."""
+        self.recording_path    = path
+        self.video_writers     = {}
+        self.video_writer_dims = {}
+        self._rec_hwnd_paths   = {}
+        self._rec_next_idx     = 0      # stable counter for multi-window filename suffixes
+        self._audio_tmp_path   = None
+        self._audio_thread     = None
+        self._start_audio_capture()
+        self.recording = True
+
+    def _start_audio_capture( self ):
+        """Start a background thread that records WASAPI loopback (system audio) to a temp WAV."""
+        try:
+            import pyaudiowpatch as pyaudio
+        except ImportError:
+            print( 'WARNING: pyaudiowpatch not installed; recording without audio' )
+            return
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp( suffix='.wav' )
+            os.close( tmp_fd )
+            self._audio_tmp_path = tmp_path
+            self._audio_thread   = threading.Thread(
+                target=self._audio_record_loop,
+                kwargs={ 'pyaudio_mod': pyaudio, 'tmp_path': tmp_path },
+                daemon=True
+            )
+            self._audio_thread.start()
+        except Exception as exc:
+            print( 'WARNING: could not start audio capture: %s' % exc )
+            self._audio_tmp_path = None
+            self._audio_thread   = None
+
+    def _audio_record_loop( self, pyaudio_mod, tmp_path ):
+        """Background thread: capture WASAPI loopback audio and write it to a WAV file."""
+        try:
+            with pyaudio_mod.PyAudio() as pa:
+                wasapi_info = pa.get_host_api_info_by_type( pyaudio_mod.paWASAPI )
+                speakers    = pa.get_device_info_by_index( wasapi_info['defaultOutputDevice'] )
+                # Prefer the dedicated loopback device if the default output is not already one
+                if not speakers.get( 'isLoopbackDevice', False ):
+                    for loopback in pa.get_loopback_device_info_generator():
+                        if speakers['name'] in loopback['name']:
+                            speakers = loopback
+                            break
+                rate     = int( speakers['defaultSampleRate'] )
+                channels = speakers['maxInputChannels'] or 2   # loopback devices set maxInputChannels; fall back to stereo
+                chunk    = 512
+                stream   = pa.open(
+                    format            = pyaudio_mod.paInt16,
+                    channels          = channels,
+                    rate              = rate,
+                    frames_per_buffer = chunk,
+                    input             = True,
+                    input_device_index= speakers['index'],
+                )
+                with wave.open( tmp_path, 'wb' ) as wf:
+                    wf.setnchannels( channels )
+                    wf.setsampwidth( pa.get_sample_size( pyaudio_mod.paInt16 ) )
+                    wf.setframerate( rate )
+                    while self.recording:
+                        data = stream.read( chunk, exception_on_overflow=False )
+                        wf.writeframes( data )
+                stream.stop_stream()
+                stream.close()
+        except Exception as exc:
+            print( 'WARNING: audio recording failed: %s' % exc )
+
+    # Path to the bundled ffmpeg downloaded by check-prereqs.bat during setup.
+    # Falls back to whatever 'ffmpeg' is on the system PATH.
+    _FFMPEG_BUNDLED = os.path.normpath(
+        os.path.join( os.path.dirname( os.path.abspath(__file__) ),
+                      '..', '..', '..', 'tools', 'ffmpeg.exe' ) )
+
+    def _mux_audio_into_video( self, video_path, audio_path ):
+        """Use ffmpeg to mux audio_path into video_path, replacing the file in-place."""
+        ffmpeg = self._FFMPEG_BUNDLED if os.path.isfile( self._FFMPEG_BUNDLED ) else 'ffmpeg'
+        base, ext = os.path.splitext( video_path )
+        tmp_out   = base + '_withaudio' + ext
+        try:
+            result = subprocess.run(
+                [ ffmpeg, '-y',
+                  '-i', video_path,
+                  '-i', audio_path,
+                  '-c:v', 'copy', '-c:a', 'aac', '-shortest',
+                  tmp_out ],
+                capture_output=True, timeout=120
+            )
+            if result.returncode == 0:
+                os.replace( tmp_out, video_path )
+            else:
+                print( 'WARNING: ffmpeg mux failed (code %d); video saved without audio\n%s'
+                       % ( result.returncode,
+                           result.stderr.decode( errors='replace' ) ) )
+                try: os.unlink( tmp_out )
+                except OSError: pass
+        except FileNotFoundError:
+            print( 'WARNING: ffmpeg not found; video saved without audio' )
+        except subprocess.TimeoutExpired:
+            print( 'WARNING: ffmpeg mux timed out; video saved without audio' )
+            try: os.unlink( tmp_out )
+            except OSError: pass
+
+    def stop_recording( self ):
+        """Stop recording, mux captured audio into each video file, release resources."""
+        self.recording = False
+        # Wait for the audio thread to finish flushing its last chunk to the WAV
+        if self._audio_thread is not None:
+            self._audio_thread.join( timeout=5.0 )
+            if self._audio_thread.is_alive():
+                print( 'WARNING: audio capture thread did not finish cleanly within timeout' )
+        # Flush and close all video writers
+        for wr in self.video_writers.values():
+            wr.release()
+        # Mux audio into every recorded video file
+        if self._audio_tmp_path and os.path.exists( self._audio_tmp_path ):
+            for video_path in self._rec_hwnd_paths.values():
+                if os.path.exists( video_path ):
+                    self._mux_audio_into_video( video_path, self._audio_tmp_path )
+            try: os.unlink( self._audio_tmp_path )
+            except OSError: pass
+        self.video_writers     = {}
+        self.video_writer_dims = {}
+        self._rec_hwnd_paths   = {}
+        self._rec_next_idx     = 0
+        self._audio_tmp_path   = None
+        self._audio_thread     = None
 
     def update_sizes( self, sizes ):
         while( len( self.sizes ) ):
@@ -595,7 +736,12 @@ class mmc_realtime:
             for hwnd in img_buffer[-1][1]: # the list of things to show is whatever the *latest* list of captured coordinates is
                 self.profiler.mark( 'pre_full' )
                 new_xyxy = img_buffer[-1][1][hwnd][1]
-                self.to_show[ hwnd ] = np.full( (new_xyxy[3]-new_xyxy[1], new_xyxy[2]-new_xyxy[0], 3 ), 127, dtype=np.uint8 )
+                _h = new_xyxy[3]-new_xyxy[1]
+                _w = new_xyxy[2]-new_xyxy[0]
+                if hwnd not in self.to_show or self.to_show[hwnd] is None or self.to_show[hwnd].shape[:2] != (_h, _w):
+                    self.to_show[hwnd] = np.full( (_h, _w, 3), 127, dtype=np.uint8 )
+                else:
+                    self.to_show[hwnd].fill( 127 )
                 self.profiler.mark( 'post_full' )
 
                 if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0]:
@@ -615,9 +761,9 @@ class mmc_realtime:
                     # you could do this faster by intersecting with window size as you
                     # go, but it's really annoying
                     # this probably isn't that slow
-                    relevant_boxes = self.boxes[self.boxes_hwnd_index[hwnd]][0:last_box_index+1].copy()
-                    relevant_boxes = relevant_boxes[np.less(relevant_boxes[:,2],min_w )] #discard boxes that start to the right of min_w
-                    relevant_boxes = relevant_boxes[np.less(relevant_boxes[:,3],min_h )]
+                    _src = self.boxes[self.boxes_hwnd_index[hwnd]][0:last_box_index+1]
+                    _mask = (_src[:,2] < min_w) & (_src[:,3] < min_h)
+                    relevant_boxes = _src[_mask]
                     relevant_boxes[:,4]=np.fmin(relevant_boxes[:,4],min_w)
                     relevant_boxes[:,5]=np.fmin(relevant_boxes[:,5],min_h)
 
@@ -630,6 +776,37 @@ class mmc_realtime:
 
                 self.show( self.to_show[ hwnd ], hwnd, new_xyxy )
                 self.profiler.mark( 'showed' )
+
+                # ── Record censored frame if recording is active ──────────
+                if self.recording and self.to_show[hwnd] is not None:
+                    img = self.to_show[hwnd]
+                    h, w = img.shape[:2]
+                    # Release writer and recreate if frame size has changed.
+                    # NOTE: VideoWriter.get(CAP_PROP_FRAME_WIDTH/HEIGHT) always returns 0,
+                    # so we track dimensions in video_writer_dims instead.
+                    if hwnd in self.video_writers and self.video_writer_dims.get(hwnd) != (w, h):
+                        self.video_writers[hwnd].release()
+                        del self.video_writers[hwnd]
+                        del self.video_writer_dims[hwnd]
+                    if hwnd not in self.video_writers:
+                        base, ext = os.path.splitext(self.recording_path)
+                        if not ext:
+                            ext = '.mp4'
+                        if hwnd not in self._rec_hwnd_paths:
+                            idx = self._rec_next_idx
+                            self._rec_next_idx += 1
+                            filepath = (base + ext) if idx == 0 else ('%s_%d%s' % (base, idx, ext))
+                            self._rec_hwnd_paths[hwnd] = filepath
+                        # Choose codec based on extension for compatibility
+                        codec = 'XVID' if ext.lower() == '.avi' else 'mp4v'
+                        fourcc = cv2.VideoWriter_fourcc(*codec)
+                        self.video_writers[hwnd] = cv2.VideoWriter(
+                            self._rec_hwnd_paths[hwnd], fourcc, 30.0, (w, h))
+                        self.video_writer_dims[hwnd] = (w, h)
+                        if not self.video_writers[hwnd].isOpened():
+                            print( 'WARNING: could not open video writer for %s' % self._rec_hwnd_paths[hwnd] )
+                    if self.video_writers[hwnd].isOpened():
+                        self.video_writers[hwnd].write(img)
 
             # avoid deleting from dict while iterating over dict
             windows_to_close = []
@@ -665,6 +842,7 @@ class mmc_realtime:
                 self.open_windows = {}
                 if t1.is_alive():
                     t1.join()
+                self.stop_recording()
                 break
 
             self.profiler.mark( 'post_wait' )

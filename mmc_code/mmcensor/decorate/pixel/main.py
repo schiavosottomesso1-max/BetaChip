@@ -23,7 +23,9 @@ class decorator:
                     factor = self.strength * min( w,h ) / 100
                     new_w = math.ceil( w/factor )
                     new_h = math.ceil( h/factor )
-                    img[box[3]:box[5],box[2]:box[4]]=cv2.resize( cv2.resize( img[box[3]:box[5],box[2]:box[4]], (new_w,new_h), interpolation=cv2.BORDER_DEFAULT ), (w,h), interpolation = cv2.INTER_NEAREST )
+                    roi = img[box[3]:box[5],box[2]:box[4]]
+                    small = cv2.resize( roi, (new_w,new_h), interpolation=cv2.INTER_AREA )
+                    img[box[3]:box[5],box[2]:box[4]] = cv2.resize( small, (w,h), interpolation=cv2.INTER_NEAREST )
 
         return img
 

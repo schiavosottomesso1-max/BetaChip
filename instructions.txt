@@ -45,6 +45,11 @@ save a screenshot in the Screenshots/ folder in the MMC folder.  Refresh Window 
 refreshes the window list if you open new windows or close old ones.  FPS numbers will
 be visible in the command window.
 
+To record the censored output as a video (with audio from your PC speakers/game),
+click "Record", choose where to save the file, then click "● Stop Rec" when done.
+The setup.bat already installs everything needed for recording (pyaudiowpatch and
+ffmpeg) — you do NOT need to install anything extra on your PC.
+
 Sometimes the censoring overlay doesn't properly pop up.  I don't know why.  You can find 
 it in your taskbar and click it to bring it up.
 
