@@ -4,6 +4,7 @@ numpy
 onnx==1.16.1
 onnxruntime-directml==1.18.1
 opencv-python==4.10.0.84
+pyaudiowpatch
 pywin32==306
 torch==2.3.1+cpu
 torchaudio==2.3.1+cpu

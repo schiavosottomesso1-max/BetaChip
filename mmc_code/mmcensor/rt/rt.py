@@ -13,6 +13,9 @@ import os
 import sys
 import copy
 import importlib
+import subprocess
+import tempfile
+import wave
 from functools import partial
 import mmcensor.config as mmc_config
 import mmcensor.nn as nn
@@ -452,6 +455,8 @@ class mmc_realtime:
         self.recording_path = None
         self._rec_hwnd_paths = {}    # hwnd -> file path (set at writer-creation time)
         self._rec_next_idx = 0       # stable counter for multi-window filename suffixes
+        self._audio_thread   = None  # background thread capturing WASAPI loopback audio
+        self._audio_tmp_path = None  # temp WAV file path written by _audio_thread
 
     def take_screenshot( self ):
         for hwnd in self.to_show:
@@ -466,17 +471,120 @@ class mmc_realtime:
         self.video_writer_dims = {}
         self._rec_hwnd_paths   = {}
         self._rec_next_idx     = 0      # stable counter for multi-window filename suffixes
+        self._audio_tmp_path   = None
+        self._audio_thread     = None
+        self._start_audio_capture()
         self.recording = True
 
+    def _start_audio_capture( self ):
+        """Start a background thread that records WASAPI loopback (system audio) to a temp WAV."""
+        try:
+            import pyaudiowpatch as pyaudio
+        except ImportError:
+            print( 'WARNING: pyaudiowpatch not installed; recording without audio' )
+            return
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp( suffix='.wav' )
+            os.close( tmp_fd )
+            self._audio_tmp_path = tmp_path
+            self._audio_thread   = threading.Thread(
+                target=self._audio_record_loop,
+                kwargs={ 'pyaudio_mod': pyaudio, 'tmp_path': tmp_path },
+                daemon=True
+            )
+            self._audio_thread.start()
+        except Exception as exc:
+            print( 'WARNING: could not start audio capture: %s' % exc )
+            self._audio_tmp_path = None
+            self._audio_thread   = None
+
+    def _audio_record_loop( self, pyaudio_mod, tmp_path ):
+        """Background thread: capture WASAPI loopback audio and write it to a WAV file."""
+        try:
+            with pyaudio_mod.PyAudio() as pa:
+                wasapi_info = pa.get_host_api_info_by_type( pyaudio_mod.paWASAPI )
+                speakers    = pa.get_device_info_by_index( wasapi_info['defaultOutputDevice'] )
+                # Prefer the dedicated loopback device if the default output is not already one
+                if not speakers.get( 'isLoopbackDevice', False ):
+                    for loopback in pa.get_loopback_device_info_generator():
+                        if speakers['name'] in loopback['name']:
+                            speakers = loopback
+                            break
+                rate     = int( speakers['defaultSampleRate'] )
+                channels = speakers['maxInputChannels'] or 2   # loopback devices set maxInputChannels; fall back to stereo
+                chunk    = 512
+                stream   = pa.open(
+                    format            = pyaudio_mod.paInt16,
+                    channels          = channels,
+                    rate              = rate,
+                    frames_per_buffer = chunk,
+                    input             = True,
+                    input_device_index= speakers['index'],
+                )
+                with wave.open( tmp_path, 'wb' ) as wf:
+                    wf.setnchannels( channels )
+                    wf.setsampwidth( pa.get_sample_size( pyaudio_mod.paInt16 ) )
+                    wf.setframerate( rate )
+                    while self.recording:
+                        data = stream.read( chunk, exception_on_overflow=False )
+                        wf.writeframes( data )
+                stream.stop_stream()
+                stream.close()
+        except Exception as exc:
+            print( 'WARNING: audio recording failed: %s' % exc )
+
+    def _mux_audio_into_video( self, video_path, audio_path ):
+        """Use ffmpeg to mux audio_path into video_path, replacing the file in-place."""
+        base, ext = os.path.splitext( video_path )
+        tmp_out   = base + '_withaudio' + ext
+        try:
+            result = subprocess.run(
+                [ 'ffmpeg', '-y',
+                  '-i', video_path,
+                  '-i', audio_path,
+                  '-c:v', 'copy', '-c:a', 'aac', '-shortest',
+                  tmp_out ],
+                capture_output=True, timeout=120
+            )
+            if result.returncode == 0:
+                os.replace( tmp_out, video_path )
+            else:
+                print( 'WARNING: ffmpeg mux failed (code %d); video saved without audio\n%s'
+                       % ( result.returncode,
+                           result.stderr.decode( errors='replace' ) ) )
+                try: os.unlink( tmp_out )
+                except OSError: pass
+        except FileNotFoundError:
+            print( 'WARNING: ffmpeg not found in PATH; video saved without audio' )
+        except subprocess.TimeoutExpired:
+            print( 'WARNING: ffmpeg mux timed out; video saved without audio' )
+            try: os.unlink( tmp_out )
+            except OSError: pass
+
     def stop_recording( self ):
-        """Stop recording and flush / release all open VideoWriters."""
+        """Stop recording, mux captured audio into each video file, release resources."""
         self.recording = False
+        # Wait for the audio thread to finish flushing its last chunk to the WAV
+        if self._audio_thread is not None:
+            self._audio_thread.join( timeout=5.0 )
+            if self._audio_thread.is_alive():
+                print( 'WARNING: audio capture thread did not finish cleanly within timeout' )
+        # Flush and close all video writers
         for wr in self.video_writers.values():
             wr.release()
+        # Mux audio into every recorded video file
+        if self._audio_tmp_path and os.path.exists( self._audio_tmp_path ):
+            for video_path in self._rec_hwnd_paths.values():
+                if os.path.exists( video_path ):
+                    self._mux_audio_into_video( video_path, self._audio_tmp_path )
+            try: os.unlink( self._audio_tmp_path )
+            except OSError: pass
         self.video_writers     = {}
         self.video_writer_dims = {}
         self._rec_hwnd_paths   = {}
         self._rec_next_idx     = 0
+        self._audio_tmp_path   = None
+        self._audio_thread     = None
 
     def update_sizes( self, sizes ):
         while( len( self.sizes ) ):

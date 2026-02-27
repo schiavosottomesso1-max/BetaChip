@@ -432,9 +432,15 @@ class mmc_gui:
         self.stop_record_button.config(state='normal', text='● Stop Rec', bg=_REC_RED)
 
     def stop_record_pushed( self ):
-        self.rt.stop_recording()
-        self.stop_record_button.config(state='disabled', text='Stop Rec', bg=_ACCENT)
-        self.record_button.config(state='normal')
+        self.stop_record_button.config(state='disabled', text='⏳ Saving…', bg=_ROSE_GOLD)
+        self.record_button.config(state='disabled')
+        t = threading.Thread( target=self._stop_record_async, daemon=True )
+        t.start()
+
+    def _stop_record_async( self ):
+        self.rt.stop_recording()          # blocks while audio thread joins + ffmpeg muxes
+        self.stop_record_button.config( state='disabled', text='Stop Rec', bg=_ACCENT )
+        self.record_button.config( state='normal' )
 
     def stop_pushed( self ):
         self.rt.running = False
