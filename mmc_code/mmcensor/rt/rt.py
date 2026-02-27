@@ -215,14 +215,14 @@ class mmc_detect_loop_class:
         self.models = {}
         for size in mmc_const.supported_sizes:
             if self.env == 'openvino':
-                model = YOLO( "../neuralnet_models/640m_openvino_model" )
+                model = YOLO( "../neuralnet_models/640m_openvino_model", task='detect' )
             elif self.env == 'directml':
                 onnx_path = "../neuralnet_models/640m.onnx"
-                model = YOLO( onnx_path )
+                model = YOLO( onnx_path, task='detect' )
             elif self.env == 'tensorrt':
                 engine_path = "../neuralnet_models/640m-%d.engine"%size
                 if os.path.isfile( engine_path ):
-                    model = YOLO( engine_path )
+                    model = YOLO( engine_path, task='detect' )
                 else:
                     model = None
             # tested this on 20240813
@@ -236,7 +236,7 @@ class mmc_detect_loop_class:
                 #else:
                     #model = None
             else:
-                model = YOLO( "../neuralnet_models/640m.pt" )
+                model = YOLO( "../neuralnet_models/640m.pt", task='detect' )
 
             if model is not None:
                 self.models[size] = model
