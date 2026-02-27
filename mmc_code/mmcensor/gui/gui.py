@@ -43,6 +43,34 @@ def _lbl( parent, **kw ):
     defaults.update(kw)
     return tk.Label( parent, **defaults )
 
+def _theme_frame( widget ):
+    """Recursively apply the pink theme to a widget tree (for externally built config frames)."""
+    cls = widget.winfo_class()
+    try:
+        widget.configure( bg=_BG )
+    except tk.TclError:
+        pass
+    if cls == "Entry":
+        try:
+            widget.configure( bg=_LIST_BG, fg=_TEXT_DARK, font=_FONT_NORM,
+                               relief="flat", highlightthickness=1,
+                               highlightcolor=_ACCENT, insertbackground=_TEXT_DARK )
+        except tk.TclError:
+            pass
+    elif cls == "Checkbutton":
+        try:
+            widget.configure( fg=_TEXT_DARK, font=_FONT_NORM,
+                               selectcolor=_ROSE_GOLD, activebackground=_BG )
+        except tk.TclError:
+            pass
+    elif cls == "Label":
+        try:
+            widget.configure( fg=_TEXT_DARK, font=_FONT_NORM )
+        except tk.TclError:
+            pass
+    for child in widget.winfo_children():
+        _theme_frame( child )
+
 
 class mmc_gui:
     
