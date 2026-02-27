@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 from mmcensor.rt import mmc_realtime
 import os
 import sys
@@ -154,11 +154,14 @@ class mmc_gui:
         self.start_button      = _btn( rt_btn_bar, text="Start",       command=self.start_pushed,     state="disabled" )
         self.stop_button       = _btn( rt_btn_bar, text="Stop",        command=self.stop_pushed,      state="disabled" )
         self.screenshot_button = _btn( rt_btn_bar, text="Screenshot",  command=self.screenshot_pushed, state="disabled" )
+        self.record_button     = _btn( rt_btn_bar, text="Record",      command=self.record_pushed,    state="disabled" )
+        self.stop_record_button= _btn( rt_btn_bar, text="Stop Rec",    command=self.stop_record_pushed, state="disabled" )
         self.get_hwnds_button  = _btn( rt_btn_bar, text="Refresh Window List", command=self.refresh_hwnds )
 
         for col, btn in enumerate( [self.ready_button, self.start_button,
-                                    self.stop_button, self.screenshot_button,
-                                    self.get_hwnds_button] ):
+                                     self.stop_button, self.screenshot_button,
+                                     self.record_button, self.stop_record_button,
+                                     self.get_hwnds_button] ):
             btn.grid( row=0, column=col, padx=4 )
 
         # placeholder for realtime threads
@@ -403,15 +406,34 @@ class mmc_gui:
         self.t_decorate.start()
         self.screenshot_button.config(state='normal')
         self.stop_button.config(state='normal')
+        self.record_button.config(state='normal')
 
     def start_async( self ):
         self.rt.go_decorate()
         self.start_button.config(state='normal')
         self.screenshot_button.config(state='disabled')
         self.stop_button.config(state='disabled')
+        self.record_button.config(state='disabled')
+        self.stop_record_button.config(state='disabled')
 
     def screenshot_pushed( self ):
         self.rt.take_screenshot()
+
+    def record_pushed( self ):
+        path = filedialog.asksaveasfilename(
+            title="Save recording as…",
+            defaultextension=".mp4",
+            filetypes=[("MP4 video", "*.mp4"), ("AVI video", "*.avi"), ("All files", "*.*")] )
+        if not path:
+            return
+        self.rt.start_recording( path )
+        self.record_button.config(state='disabled')
+        self.stop_record_button.config(state='normal')
+
+    def stop_record_pushed( self ):
+        self.rt.stop_recording()
+        self.stop_record_button.config(state='disabled')
+        self.record_button.config(state='normal')
 
     def stop_pushed( self ):
         self.rt.running = False

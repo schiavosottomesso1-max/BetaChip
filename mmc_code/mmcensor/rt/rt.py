@@ -446,11 +446,34 @@ class mmc_realtime:
         self.off_gray_callback = None
         self.gray_state = False
 
+        self.recording = False
+        self.video_writers = {}      # hwnd -> cv2.VideoWriter
+        self.recording_path = None
+        self._rec_hwnd_paths = {}    # hwnd -> file path (set at writer-creation time)
+        self._rec_next_idx = 0       # stable counter for multi-window filename suffixes
+
     def take_screenshot( self ):
         for hwnd in self.to_show:
             if self.to_show[hwnd] is not None:
                 now = datetime.today().strftime('%Y%m%d%H%M%S%f')
                 cv2.imwrite( '../screenshots/%s.jpg'%now, self.to_show[hwnd] )
+
+    def start_recording( self, path ):
+        """Begin recording censored output.  Writers are created lazily on the first frame."""
+        self.recording_path  = path
+        self.video_writers   = {}
+        self._rec_hwnd_paths = {}
+        self._rec_next_idx   = 0      # stable counter for multi-window filename suffixes
+        self.recording = True
+
+    def stop_recording( self ):
+        """Stop recording and flush / release all open VideoWriters."""
+        self.recording = False
+        for wr in self.video_writers.values():
+            wr.release()
+        self.video_writers   = {}
+        self._rec_hwnd_paths = {}
+        self._rec_next_idx   = 0
 
     def update_sizes( self, sizes ):
         while( len( self.sizes ) ):
@@ -631,6 +654,36 @@ class mmc_realtime:
                 self.show( self.to_show[ hwnd ], hwnd, new_xyxy )
                 self.profiler.mark( 'showed' )
 
+                # ── Record censored frame if recording is active ──────────
+                if self.recording and self.to_show[hwnd] is not None:
+                    img = self.to_show[hwnd]
+                    h, w = img.shape[:2]
+                    # Release writer and recreate if frame size has changed
+                    if hwnd in self.video_writers:
+                        wr = self.video_writers[hwnd]
+                        if (int(wr.get(cv2.CAP_PROP_FRAME_WIDTH)) != w or
+                                int(wr.get(cv2.CAP_PROP_FRAME_HEIGHT)) != h):
+                            wr.release()
+                            del self.video_writers[hwnd]
+                    if hwnd not in self.video_writers:
+                        base, ext = os.path.splitext(self.recording_path)
+                        if not ext:
+                            ext = '.mp4'
+                        if hwnd not in self._rec_hwnd_paths:
+                            idx = self._rec_next_idx
+                            self._rec_next_idx += 1
+                            filepath = (base + ext) if idx == 0 else ('%s_%d%s' % (base, idx, ext))
+                            self._rec_hwnd_paths[hwnd] = filepath
+                        # Choose codec based on extension for compatibility
+                        codec = 'XVID' if ext.lower() == '.avi' else 'mp4v'
+                        fourcc = cv2.VideoWriter_fourcc(*codec)
+                        self.video_writers[hwnd] = cv2.VideoWriter(
+                            self._rec_hwnd_paths[hwnd], fourcc, 30.0, (w, h))
+                        if not self.video_writers[hwnd].isOpened():
+                            print( 'WARNING: could not open video writer for %s' % self._rec_hwnd_paths[hwnd] )
+                    if self.video_writers[hwnd].isOpened():
+                        self.video_writers[hwnd].write(img)
+
             # avoid deleting from dict while iterating over dict
             windows_to_close = []
             for window_hwnd in self.open_windows:
@@ -665,6 +718,7 @@ class mmc_realtime:
                 self.open_windows = {}
                 if t1.is_alive():
                     t1.join()
+                self.stop_recording()
                 break
 
             self.profiler.mark( 'post_wait' )
