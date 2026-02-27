@@ -33,7 +33,7 @@ def _btn( parent, **kw ):
 
 def _chk( parent, **kw ):
     """Helper: create a consistently styled pink Checkbutton."""
-    defaults = dict( bg=_BG, fg=_TEXT_DARK, selectcolor=_ROSE_GOLD,
+    defaults = dict( bg=_BG, fg=_TEXT_DARK, selectcolor=_ACCENT,
                      activebackground=_BG, font=_FONT_NORM )
     defaults.update(kw)
     return tk.Checkbutton( parent, **defaults )
@@ -65,7 +65,7 @@ def _theme_frame( widget ):
     elif cls == "Checkbutton":
         try:
             widget.configure( fg=_TEXT_DARK, font=_FONT_NORM,
-                               selectcolor=_ROSE_GOLD, activebackground=_BG )
+                               selectcolor=_ACCENT, activebackground=_BG )
         except tk.TclError:
             pass
     elif cls == "Label":
