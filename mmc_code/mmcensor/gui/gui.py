@@ -44,7 +44,11 @@ def _lbl( parent, **kw ):
     return tk.Label( parent, **defaults )
 
 def _theme_frame( widget ):
-    """Recursively apply the pink theme to a widget tree (for externally built config frames)."""
+    """Recursively apply the pink theme to an entire widget tree rooted at `widget`.
+    Intended for frames built externally (e.g. decorator populate_config_frame calls)
+    so their unstyled tk.Label / tk.Entry / tk.Checkbutton children all get the
+    pink palette without touching the decorator logic files.
+    """
     cls = widget.winfo_class()
     try:
         widget.configure( bg=_BG )
@@ -109,15 +113,16 @@ class mmc_gui:
         self.title_canvas.grid( row=0, column=0, sticky="ew" )
         self.title_canvas.bind( "<Configure>", self._redraw_title )
 
-        self.save_button    = _btn( self.root, text="Save",                      command=self.save_pushed   )
-        self.save_as_button = _btn( self.root, text="Save As (not yet implemented)" )
-        self.load_button    = _btn( self.root, text="Load",                      command=self.load_pushed   )
-
         btn_bar = tk.Frame( self.root, bg=_BG )
         btn_bar.grid( row=1, column=0, sticky="ew", padx=4, pady=4 )
-        self.save_button.grid(    in_=btn_bar, row=0, column=0, padx=4 )
-        self.save_as_button.grid( in_=btn_bar, row=0, column=1, padx=4 )
-        self.load_button.grid(    in_=btn_bar, row=0, column=2, padx=4 )
+
+        self.save_button    = _btn( btn_bar, text="Save",                         command=self.save_pushed )
+        self.save_as_button = _btn( btn_bar, text="Save As (not yet implemented)"                          )
+        self.load_button    = _btn( btn_bar, text="Load",                         command=self.load_pushed )
+
+        self.save_button.grid(    row=0, column=0, padx=4 )
+        self.save_as_button.grid( row=0, column=1, padx=4 )
+        self.load_button.grid(    row=0, column=2, padx=4 )
 
         tab_parent = ttk.Notebook( self.root )
         self.tab_decorate = ttk.Frame( tab_parent )
@@ -131,6 +136,7 @@ class mmc_gui:
         self.tab_realtime.columnconfigure( 0, weight=1 )
         self.tab_realtime.rowconfigure( 1, weight=1 )
         self.tab_decorate.columnconfigure( 0, weight=1 )
+        self.tab_decorate.columnconfigure( 1, weight=1 )
         self.tab_decorate.rowconfigure( 1, weight=1 )
 
         #############################
@@ -232,6 +238,9 @@ class mmc_gui:
             "<Configure>",
             lambda e: dec_canvas.configure(
                 scrollregion=dec_canvas.bbox("all") ) )
+        dec_canvas.bind(
+            "<Configure>",
+            lambda e: dec_canvas.itemconfigure( self._dec_window, width=e.width ) )
 
         self.decorator_config_frame = None
         self.decorator_being_configured = None
@@ -306,24 +315,51 @@ class mmc_gui:
         self.decorator_types.pop(index)
         self.redraw_decorators()
 
+    def _destroy_config_panel( self ):
+        """Destroy and nullify the currently open decorator config panel, if any."""
+        if self.decorator_config_frame is not None:
+            self.decorator_config_frame.destroy()
+            self.decorator_config_frame = None
+
     def configure_decorator( self, index ):
+        # Destroy any previously open config panel first
+        self._destroy_config_panel()
         self.redraw_decorators()
-        self.decorator_config_frame = tk.Frame( self.tab_decorate, bg=_BG )
-        self.decorator_save_config_button  = _btn( self.decorators_frame, text="apply config",
-                                                   command=partial( self.apply_decorator_config, index ) )
-        self.decorator_close_config_button = _btn( self.decorators_frame, text="close",
-                                                   command=partial( self.close_decorator_config, index ) )
-        self.decorator_save_config_button.grid(  row=index, column=4, padx=2, pady=2 )
-        self.decorator_close_config_button.grid( row=index, column=5, padx=2, pady=2 )
-        self.rt.decorators[index].populate_config_frame( self.decorator_config_frame )
-        self.decorator_config_frame.grid( row=1, column=4, columnspan=2, rowspan=30 )
+
+        # Outer panel — column 1 of tab_decorate
+        self.decorator_config_frame = tk.Frame(
+            self.tab_decorate, bg=_BG,
+            highlightbackground=_ROSE_GOLD, highlightthickness=1 )
+
+        # Header
+        _lbl( self.decorator_config_frame,
+              text=f"Configure: {self.decorator_types[index]}",
+              font=_FONT_BOLD ).grid( row=0, column=0, columnspan=6,
+                                      sticky="w", padx=8, pady=(8, 4) )
+
+        # Content sub-frame populated by the decorator
+        config_content = tk.Frame( self.decorator_config_frame, bg=_BG )
+        config_content.grid( row=1, column=0, columnspan=6,
+                             sticky="nsew", padx=8, pady=4 )
+        self.rt.decorators[index].populate_config_frame( config_content )
+        _theme_frame( config_content )
+
+        # Action buttons inside the panel
+        btn_row = tk.Frame( self.decorator_config_frame, bg=_BG )
+        btn_row.grid( row=2, column=0, columnspan=6, pady=8, sticky="ew" )
+        _btn( btn_row, text="Apply",
+              command=partial( self.apply_decorator_config, index ) ).grid( row=0, column=0, padx=4 )
+        _btn( btn_row, text="Close",
+              command=partial( self.close_decorator_config, index ) ).grid( row=0, column=1, padx=4 )
+
+        self.decorator_config_frame.grid( row=1, column=1, sticky="nsew", padx=8, pady=4 )
 
     def apply_decorator_config( self, index ):
         self.rt.decorators[index].apply_config_from_config_frame()
 
     def close_decorator_config( self, index ):
         self.rt.decorators[index].destroy_config_frame()
-        self.decorator_config_frame.destroy()
+        self._destroy_config_panel()
         self.redraw_decorators()
     
     def save_pushed( self ):
