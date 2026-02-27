@@ -18,6 +18,7 @@ _TEXT_LIGHT = "white"
 _TEXT_DARK  = "#4A0030"   # deep magenta for dark text on light bg
 _LIST_BG    = "#FFE4EF"   # very pale pink for listbox / entry fields
 _SEL_BG     = "#FF69B4"   # selection highlight
+_REC_RED    = "#CC0000"   # red for active-recording indicator
 _FONT_NORM  = ("Arial", 10)
 _FONT_BOLD  = ("Arial", 10, "bold")
 
@@ -428,11 +429,11 @@ class mmc_gui:
             return
         self.rt.start_recording( path )
         self.record_button.config(state='disabled')
-        self.stop_record_button.config(state='normal')
+        self.stop_record_button.config(state='normal', text='● Stop Rec', bg=_REC_RED)
 
     def stop_record_pushed( self ):
         self.rt.stop_recording()
-        self.stop_record_button.config(state='disabled')
+        self.stop_record_button.config(state='disabled', text='Stop Rec', bg=_ACCENT)
         self.record_button.config(state='normal')
 
     def stop_pushed( self ):

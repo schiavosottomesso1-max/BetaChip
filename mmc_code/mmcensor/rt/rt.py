@@ -448,6 +448,7 @@ class mmc_realtime:
 
         self.recording = False
         self.video_writers = {}      # hwnd -> cv2.VideoWriter
+        self.video_writer_dims = {}  # hwnd -> (w, h); VideoWriter.get(CAP_PROP_FRAME_WIDTH/HEIGHT) returns 0, so stored separately
         self.recording_path = None
         self._rec_hwnd_paths = {}    # hwnd -> file path (set at writer-creation time)
         self._rec_next_idx = 0       # stable counter for multi-window filename suffixes
@@ -460,10 +461,11 @@ class mmc_realtime:
 
     def start_recording( self, path ):
         """Begin recording censored output.  Writers are created lazily on the first frame."""
-        self.recording_path  = path
-        self.video_writers   = {}
-        self._rec_hwnd_paths = {}
-        self._rec_next_idx   = 0      # stable counter for multi-window filename suffixes
+        self.recording_path    = path
+        self.video_writers     = {}
+        self.video_writer_dims = {}
+        self._rec_hwnd_paths   = {}
+        self._rec_next_idx     = 0      # stable counter for multi-window filename suffixes
         self.recording = True
 
     def stop_recording( self ):
@@ -471,9 +473,10 @@ class mmc_realtime:
         self.recording = False
         for wr in self.video_writers.values():
             wr.release()
-        self.video_writers   = {}
-        self._rec_hwnd_paths = {}
-        self._rec_next_idx   = 0
+        self.video_writers     = {}
+        self.video_writer_dims = {}
+        self._rec_hwnd_paths   = {}
+        self._rec_next_idx     = 0
 
     def update_sizes( self, sizes ):
         while( len( self.sizes ) ):
@@ -658,13 +661,13 @@ class mmc_realtime:
                 if self.recording and self.to_show[hwnd] is not None:
                     img = self.to_show[hwnd]
                     h, w = img.shape[:2]
-                    # Release writer and recreate if frame size has changed
-                    if hwnd in self.video_writers:
-                        wr = self.video_writers[hwnd]
-                        if (int(wr.get(cv2.CAP_PROP_FRAME_WIDTH)) != w or
-                                int(wr.get(cv2.CAP_PROP_FRAME_HEIGHT)) != h):
-                            wr.release()
-                            del self.video_writers[hwnd]
+                    # Release writer and recreate if frame size has changed.
+                    # NOTE: VideoWriter.get(CAP_PROP_FRAME_WIDTH/HEIGHT) always returns 0,
+                    # so we track dimensions in video_writer_dims instead.
+                    if hwnd in self.video_writers and self.video_writer_dims.get(hwnd) != (w, h):
+                        self.video_writers[hwnd].release()
+                        del self.video_writers[hwnd]
+                        del self.video_writer_dims[hwnd]
                     if hwnd not in self.video_writers:
                         base, ext = os.path.splitext(self.recording_path)
                         if not ext:
@@ -679,6 +682,7 @@ class mmc_realtime:
                         fourcc = cv2.VideoWriter_fourcc(*codec)
                         self.video_writers[hwnd] = cv2.VideoWriter(
                             self._rec_hwnd_paths[hwnd], fourcc, 30.0, (w, h))
+                        self.video_writer_dims[hwnd] = (w, h)
                         if not self.video_writers[hwnd].isOpened():
                             print( 'WARNING: could not open video writer for %s' % self._rec_hwnd_paths[hwnd] )
                     if self.video_writers[hwnd].isOpened():
