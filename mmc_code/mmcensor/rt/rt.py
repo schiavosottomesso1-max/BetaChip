@@ -28,6 +28,10 @@ MIN_FPS_INTERVAL_NS = 1_000_000
 FPS_EMA_ALPHA = 0.15
 
 def _disable_windows_quick_edit():
+    # Only targets the console STD_INPUT_HANDLE (-10) to disable Quick-Edit
+    # mode that freezes the process when the user clicks in the terminal.
+    # This call does NOT affect Win32 window-message queues or GUI event
+    # handling in any way.
     if os.name != 'nt':
         return
     try:
@@ -747,8 +751,18 @@ class mmc_realtime:
             self._cached_vram_text = 'VRAM: n/a (nvidia-smi unavailable)'
         return self._cached_vram_text
 
-    def _draw_hud( self, img, frame_time_ns ):
+    def _draw_hud( self, img, frame_time_ns, waiting=False ):
         if not self.hud_enabled or img is None or img.size == 0:
+            return
+        if waiting:
+            # Frame pixel data is not yet available — show a clear placeholder
+            # so the user knows the system is alive and waiting for the AI.
+            msg = 'Waiting for frame...'
+            (tw, th), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cy = img.shape[0] // 2
+            cx = (img.shape[1] - tw) // 2
+            cv2.putText(img, msg, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(img, msg, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
             return
         now_ns = time.perf_counter_ns()
         if frame_time_ns > now_ns and not self._future_frame_warned:
@@ -821,6 +835,14 @@ class mmc_realtime:
 
         self.delay_key_print_history = {}
 
+        # Pump the OpenCV event queue from the rendering thread.
+        # startWindowThread() is a no-op on platforms that don't need it and is
+        # harmless on those that do; catch AttributeError for older OpenCV builds.
+        try:
+            cv2.startWindowThread()
+        except AttributeError:
+            pass
+
         while( True ):
             self.profiler.loop()
 
@@ -857,7 +879,6 @@ class mmc_realtime:
             self.profiler.mark( 'copied_img' )
 
             img_buffer.append( [ t_snapped, img_collection ] )
-            img_buffer[:] = [img_buffer[-1]]
 
             self.profiler.mark( 'appended_buffer' )
 
@@ -884,12 +905,24 @@ class mmc_realtime:
 
             oldest_keep_img = time.perf_counter_ns() - delay
 
+            # Retain the oldest frame that is still within the display window.
+            # Using img_buffer[0] (oldest) is intentional: it is the frame whose
+            # timestamp is straddled by available detections, allowing the renderer
+            # to reliably overlay censoring boxes. Trimming to the latest frame only
+            # would break that temporal alignment and produce a permanent gray screen.
+            while( len( img_buffer ) > 1 and img_buffer[1][0] < oldest_keep_img ):
+                img_buffer.pop(0)
+
             self.profiler.mark( 'popped_old' )
 
             # eliminate old detections
             if not img_buffer:
                 continue
-            to_show_time_ns = img_buffer[-1][0]
+            # Use the oldest buffered frame (img_buffer[0]) as the display frame.
+            # The temporal detection condition requires detections that straddle this
+            # frame's timestamp.  img_buffer[-1] is used only for the live hwnd list
+            # and overlay-window positioning (new_xyxy).
+            to_show_time_ns = img_buffer[0][0]
             oldest_detection = to_show_time_ns - self.time_safety_ns
             latest_detection = to_show_time_ns + self.time_safety_ns
             for hwnd in self.hwnd_times:
@@ -952,13 +985,13 @@ class mmc_realtime:
                     self.to_show[hwnd].fill( 127 )
                 self.profiler.mark( 'post_full' )
 
-                if hwnd in img_buffer[-1][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[-1][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[-1][0]:
-                    old_xyxy = img_buffer[-1][1][hwnd][1]
+                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0]:
+                    old_xyxy = img_buffer[0][1][hwnd][1]
                     self.profiler.mark( 'got_old_xyxy' )
                     min_h = min( old_xyxy[3] - old_xyxy[1], new_xyxy[3] - new_xyxy[1] )
                     min_w = min( old_xyxy[2] - old_xyxy[0], new_xyxy[2] - new_xyxy[0] )
 
-                    self.to_show[hwnd][0:min_h,0:min_w] = img_buffer[-1][1][hwnd][0][0:min_h,0:min_w]
+                    self.to_show[hwnd][0:min_h,0:min_w] = img_buffer[0][1][hwnd][0][0:min_h,0:min_w]
                     self.profiler.mark( 'populated_show' )
 
                     for i in range(len(self.hwnd_times[hwnd])):
@@ -979,15 +1012,17 @@ class mmc_realtime:
                         self.to_show[hwnd][0:min_h,0:min_w] = decorator.decorate( self.to_show[hwnd][0:min_h,0:min_w], relevant_boxes )
 
                     self.profiler.mark( 'decorated' )
+                    is_waiting = False
                 else:
                     has_gray_img = True
+                    is_waiting = True
 
                 now_ns = time.perf_counter_ns()
                 if self._last_display_tick_ns:
                     inst_fps = NS_PER_SECOND / max(MIN_FPS_INTERVAL_NS, now_ns - self._last_display_tick_ns)
                     self.display_fps = inst_fps if self.display_fps == 0 else ((1.0 - FPS_EMA_ALPHA) * self.display_fps + FPS_EMA_ALPHA * inst_fps)
                 self._last_display_tick_ns = now_ns
-                self.show( self.to_show[ hwnd ], hwnd, new_xyxy, to_show_time_ns )
+                self.show( self.to_show[ hwnd ], hwnd, new_xyxy, to_show_time_ns, waiting=is_waiting )
                 self.profiler.mark( 'showed' )
 
                 # ── Record censored frame if recording is active ──────────
@@ -1065,10 +1100,10 @@ class mmc_realtime:
 
             self.profiler.mark( 'post_join' )
 
-    def show( self, img, real_hwnd, new_xyxy, frame_time_ns ):
+    def show( self, img, real_hwnd, new_xyxy, frame_time_ns, waiting=False ):
         cv_title = self.cv_title_template%real_hwnd
         self.open_windows[ real_hwnd ] = cv_title
-        self._draw_hud( img, frame_time_ns )
+        self._draw_hud( img, frame_time_ns, waiting=waiting )
         cv2.imshow( cv_title, img )
         #cv2.imshow( 'rec', img )
         self.profiler.mark( 'show_call')
