@@ -22,6 +22,51 @@ import mmcensor.nn as nn
 import statistics
 from datetime import datetime
 
+def _disable_windows_quick_edit():
+    if os.name != 'nt':
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        h_stdin = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        if h_stdin == 0 or h_stdin == -1:
+            return
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h_stdin, ctypes.byref(mode)) == 0:
+            return
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        new_mode = (mode.value | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE
+        kernel32.SetConsoleMode(h_stdin, new_mode)
+    except Exception:
+        pass
+
+def _set_process_affinity(cores):
+    if not cores:
+        return False
+    try:
+        normalized = sorted({int(c) for c in cores if int(c) >= 0})
+    except Exception:
+        return False
+    if not normalized:
+        return False
+    try:
+        if hasattr(os, 'sched_setaffinity'):
+            os.sched_setaffinity(0, set(normalized))
+            return True
+    except Exception:
+        pass
+    if os.name == 'nt':
+        try:
+            mask = 0
+            for core in normalized:
+                mask |= (1 << core)
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetCurrentProcess()
+            return bool(kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(mask)))
+        except Exception:
+            return False
+    return False
+
 def get_dxcams():
     # this is in a function because the weird backdoor
     # I do doesn't work inside a class
@@ -40,6 +85,7 @@ def get_dxcams():
 class mmc_screencap:
 
     def initialize( self ):
+        self._closed = False
         # determine screen geometry
         self.populate_dxcams()
         self.visible_bounds = self.get_visible_bounds()
@@ -61,6 +107,21 @@ class mmc_screencap:
         # warm up cams
         for cam in self.cams:
             _dummy = cam['cam'].grab()
+
+    def shutdown( self ):
+        if getattr(self, '_closed', False):
+            return
+        self._closed = True
+        for shm in (getattr(self, 'img_shm', None), getattr(self, 'img_coords_shm', None), getattr(self, 'img_ref_shm', None)):
+            if shm is not None:
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
 
     def populate_dxcams( self ):
         self.cams = get_dxcams()
@@ -180,7 +241,8 @@ class mmc_detect_loop_async:
         manager = Manager()
         self.sizes = manager.list()
         self.state = manager.list()
-        self.state.append( 0 )
+        self.state.append( 0 )  # ready
+        self.state.append( 0 )  # stop
         self.sizes.extend( sizes )
         self.P1 = Process( target = mmc_detect_loop_remote, args = ( self.sizes, self.state, img_shm_name, img_coords_name, img_ref_name, img_shape, boxes_shm_name, box_hwnds_shm_name, box_info_shm_name ) )
 
@@ -193,8 +255,14 @@ class mmc_detect_loop_async:
 
     def shutdown( self ):
         if self.P1.is_alive():
-            self.P1.terminate()
-            self.P1.join()
+            try:
+                self.state[1] = 1
+            except Exception:
+                pass
+            self.P1.join(timeout=3.0)
+            if self.P1.is_alive():
+                self.P1.terminate()
+                self.P1.join()
 
 def mmc_detect_loop_remote( sizes, state, img_shm_name, img_coords_name, img_ref_name, img_shape, boxes_shm_name, box_hwnds_shm_name, box_info_shm_name):
     detector = mmc_detect_loop_class()
@@ -208,6 +276,9 @@ class mmc_detect_loop_class:
         self.sizes = sizes
         self.state = state
         self.env = os.getenv( 'mmcNNenv' )
+        self.perf_settings = mmc_config.get_perf_settings()
+        self.use_fp16 = bool(self.perf_settings.get('use-fp16', True))
+        _set_process_affinity(self.perf_settings.get('inference-affinity-cores', []))
         self.last_t = 0
         self.fps_limit = 300
         self.last_detect_finish = 0
@@ -263,7 +334,7 @@ class mmc_detect_loop_class:
 
         self.boxes_np = np.ndarray( (20,500,8), dtype = np.int64, buffer = self.boxes_shm.buf        )
         self.box_hwnds_np = np.ndarray( (50,4), dtype = np.int64, buffer = self.box_hwnds_shm.buf        )
-        self.box_info_np = np.ndarray( (4,),      dtype = np.int64, buffer = self.box_info_shm.buf )
+        self.box_info_np = np.ndarray( (8,),      dtype = np.int64, buffer = self.box_info_shm.buf )
 
         self.state[0] = 1
 
@@ -276,12 +347,15 @@ class mmc_detect_loop_class:
         self.profiler = profiler()
         self.profiler.initialize( 5, 0.0001 )
         while( True ):
+            if len(self.state) > 1 and self.state[1]:
+                break
             self.profiler.loop()
             self.profiler.mark( "start" )
             sstime = self.img_ref[0]
             self.profiler.mark( "got_time" )
 
             if sstime > self.last_t:
+                detect_started_ns = time.perf_counter_ns()
                 num_hwnds = self.img_ref[1]
                 self.profiler.mark( "got_hwnds" )
 
@@ -299,9 +373,9 @@ class mmc_detect_loop_class:
                     self.profiler.mark( "presizes" )
                     for size in self.sizes:
                         if self.env == 'tensorrt': # tensorrt needs to have engine files designed for batching
-                            output = [ self.get_model_for_size(size).predict( x, imgsz=size, verbose = False )[0] for x in batch ]
+                            output = [ self.get_model_for_size(size).predict( x, imgsz=size, verbose=False, half=self.use_fp16 )[0] for x in batch ]
                         else:
-                            output = self.get_model_for_size(size).predict( batch, imgsz=size, verbose = False )
+                            output = self.get_model_for_size(size).predict( batch, imgsz=size, verbose=False, half=self.use_fp16 )
                         #if random.randint(0,100) <2:
                             #raise Exception( "test throw" )
                         self.profiler.mark( "predict" )
@@ -310,6 +384,8 @@ class mmc_detect_loop_class:
                             self.profiler.mark( "append_out" )
 
                     self.profiler.mark( "done_predict" )
+                    write_time_ns = time.perf_counter_ns()
+                    inference_latency_ns = write_time_ns - detect_started_ns
                     self.box_info_np[0] = sstime
                     i=0
                     for hwnd in outs:
@@ -324,9 +400,23 @@ class mmc_detect_loop_class:
                         i=i+1
                     self.box_info_np[1] = i
                     self.box_info_np[2] = nn.sizes_to_key( self.sizes )
-                    self.box_info_np[3] = sstime
+                    self.box_info_np[3] = write_time_ns
+                    self.box_info_np[4] = inference_latency_ns
+                    self.box_info_np[5] = write_time_ns - sstime
+                    self.box_info_np[6] = sstime
+                    self.box_info_np[7] = 0
 
                     self.profiler.mark( "done_outs" )
+                else:
+                    write_time_ns = time.perf_counter_ns()
+                    self.box_info_np[0] = sstime
+                    self.box_info_np[1] = 0
+                    self.box_info_np[2] = nn.sizes_to_key( self.sizes )
+                    self.box_info_np[3] = write_time_ns
+                    self.box_info_np[4] = write_time_ns - detect_started_ns
+                    self.box_info_np[5] = write_time_ns - sstime
+                    self.box_info_np[6] = sstime
+                    self.box_info_np[7] = 0
 
                 self.last_t = sstime
 
@@ -344,6 +434,12 @@ class mmc_detect_loop_class:
                 t_start = t_end
                 n = 0
             self.profiler.mark( "done" )
+
+        for shm in (self.img_shm, self.img_coords_shm, self.img_ref_shm, self.boxes_shm, self.box_hwnds_shm, self.box_info_shm):
+            try:
+                shm.close()
+            except Exception:
+                pass
 
 class profiler:
     times = {}
@@ -405,6 +501,20 @@ class profiler:
 class mmc_realtime:
 
     def initialize( self ):
+        _disable_windows_quick_edit()
+        self.perf_settings = mmc_config.get_perf_settings()
+        _set_process_affinity(self.perf_settings.get('capture-gui-affinity-cores', []))
+        self.hud_enabled = bool(self.perf_settings.get('hud-enabled', True))
+        self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 150))
+        self.latest_inference_latency_ns = 0
+        self.latest_processing_delay_ns = 0
+        self.latest_detection_write_ns = 0
+        self.latest_detection_snap_ns = 0
+        self.display_fps = 0.0
+        self._last_display_tick_ns = 0
+        self._cached_vram_text = 'VRAM: n/a'
+        self._last_vram_query_ns = 0
+
         self.sc = mmc_screencap()
         self.sc.initialize()
         self.ready = False
@@ -432,7 +542,8 @@ class mmc_realtime:
 
         self.boxes_np = np.ndarray( (20,500,8), dtype = np.int64, buffer = self.boxes_shm.buf        )
         self.box_hwnds_np = np.ndarray( ( 50, 4), dtype = np.int64, buffer = self.box_hwnds_shm.buf        )
-        self.box_info_np = np.ndarray( (4,),      dtype = np.int64, buffer = self.box_info_shm.buf )
+        self.box_info_np = np.ndarray( (8,),      dtype = np.int64, buffer = self.box_info_shm.buf )
+        self.box_info_np[:] = 0
         self.box_hwnds_np[:][:]=0
 
         self.boxes = np.ndarray( (50,20000,8), dtype=np.int64 )
@@ -593,6 +704,76 @@ class mmc_realtime:
         self._audio_tmp_path   = None
         self._audio_thread     = None
 
+    def _query_vram_usage( self ):
+        now_ns = time.perf_counter_ns()
+        if now_ns - self._last_vram_query_ns < 1000 * 1000 * 1000:
+            return self._cached_vram_text
+        self._last_vram_query_ns = now_ns
+        try:
+            result = subprocess.run(
+                [ 'nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits' ],
+                capture_output=True,
+                timeout=0.8
+            )
+            if result.returncode != 0:
+                return self._cached_vram_text
+            first_line = result.stdout.decode(errors='replace').strip().splitlines()[0]
+            used_s, total_s = [x.strip() for x in first_line.split(',')[:2]]
+            used = int(used_s)
+            total = int(total_s)
+            pct = 100.0 * used / total if total else 0.0
+            self._cached_vram_text = f'VRAM: {used}/{total} MB ({pct:.0f}%)'
+        except Exception:
+            pass
+        return self._cached_vram_text
+
+    def _draw_hud( self, img, frame_time_ns ):
+        if not self.hud_enabled or img is None or img.size == 0:
+            return
+        frame_age_ms = max(0.0, (time.perf_counter_ns() - frame_time_ns) / 1_000_000.0)
+        detector_delay_ms = max(0.0, self.latest_processing_delay_ns / 1_000_000.0)
+        sync_delay_ms = max(frame_age_ms, detector_delay_ms)
+        warning = sync_delay_ms > self.sync_warning_ms
+        status_text = f"SYNC: {'WARN' if warning else 'OK'} ({sync_delay_ms:.1f} ms)"
+        lines = [
+            f'FPS: {self.display_fps:.1f}',
+            f'Infer: {self.latest_inference_latency_ns / 1_000_000.0:.1f} ms',
+            self._query_vram_usage(),
+            status_text,
+        ]
+        color = (0, 0, 255) if warning else (0, 255, 0)
+        for idx, text in enumerate(lines):
+            y = 22 + idx * 24
+            cv2.putText(img, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color if idx == 3 else (255, 255, 255), 1, cv2.LINE_AA)
+
+    def shutdown( self ):
+        self.running = False
+        try:
+            self.stop_recording()
+        except Exception:
+            pass
+        try:
+            self.detector_async.shutdown()
+        except Exception:
+            pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        for shm in (getattr(self, 'boxes_shm', None), getattr(self, 'box_hwnds_shm', None), getattr(self, 'box_info_shm', None)):
+            if shm is not None:
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
+        if getattr(self, 'sc', None) is not None:
+            self.sc.shutdown()
+
     def update_sizes( self, sizes ):
         while( len( self.sizes ) ):
             self.sizes.pop(0)
@@ -652,6 +833,8 @@ class mmc_realtime:
             self.profiler.mark( 'copied_img' )
 
             img_buffer.append( [ t_snapped, img_collection ] )
+            if len(img_buffer) > 1:
+                img_buffer[:] = img_buffer[-1:]
 
             self.profiler.mark( 'appended_buffer' )
 
@@ -678,14 +861,10 @@ class mmc_realtime:
 
             oldest_keep_img = time.perf_counter_ns() - delay
 
-            # eliminate old images
-            while( len( img_buffer ) > 1 and img_buffer[1][0] < oldest_keep_img ):
-                img_buffer.pop(0)
-
             self.profiler.mark( 'popped_old' )
 
             # eliminate old detections
-            to_show_time_ns = img_buffer[0][0]
+            to_show_time_ns = img_buffer[-1][0]
             oldest_detection = to_show_time_ns - self.time_safety_ns
             latest_detection = to_show_time_ns + self.time_safety_ns
             for hwnd in self.hwnd_times:
@@ -706,6 +885,10 @@ class mmc_realtime:
 
             detection_time = self.box_info_np[0]
             if detection_time > self.last_detection_found:
+                self.latest_detection_write_ns = int(self.box_info_np[3])
+                self.latest_inference_latency_ns = int(self.box_info_np[4])
+                self.latest_processing_delay_ns = int(self.box_info_np[5])
+                self.latest_detection_snap_ns = int(self.box_info_np[6])
                 for i in range(self.box_info_np[1]):
                     hwnd = self.box_hwnds_np[i][0]
                     num_boxes = self.box_hwnds_np[i][1]
@@ -744,13 +927,13 @@ class mmc_realtime:
                     self.to_show[hwnd].fill( 127 )
                 self.profiler.mark( 'post_full' )
 
-                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0]:
-                    old_xyxy = img_buffer[0][1][hwnd][1]
+                if hwnd in img_buffer[-1][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[-1][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[-1][0]:
+                    old_xyxy = img_buffer[-1][1][hwnd][1]
                     self.profiler.mark( 'got_old_xyxy' )
                     min_h = min( old_xyxy[3] - old_xyxy[1], new_xyxy[3] - new_xyxy[1] )
                     min_w = min( old_xyxy[2] - old_xyxy[0], new_xyxy[2] - new_xyxy[0] )
 
-                    self.to_show[hwnd][0:min_h,0:min_w] = img_buffer[0][1][hwnd][0][0:min_h,0:min_w]
+                    self.to_show[hwnd][0:min_h,0:min_w] = img_buffer[-1][1][hwnd][0][0:min_h,0:min_w]
                     self.profiler.mark( 'populated_show' )
 
                     for i in range(len(self.hwnd_times[hwnd])):
@@ -774,7 +957,12 @@ class mmc_realtime:
                 else:
                     has_gray_img = True
 
-                self.show( self.to_show[ hwnd ], hwnd, new_xyxy )
+                now_ns = time.perf_counter_ns()
+                if self._last_display_tick_ns:
+                    inst_fps = 1_000_000_000.0 / max(1, now_ns - self._last_display_tick_ns)
+                    self.display_fps = inst_fps if self.display_fps == 0 else (0.85 * self.display_fps + 0.15 * inst_fps)
+                self._last_display_tick_ns = now_ns
+                self.show( self.to_show[ hwnd ], hwnd, new_xyxy, to_show_time_ns )
                 self.profiler.mark( 'showed' )
 
                 # ── Record censored frame if recording is active ──────────
@@ -852,9 +1040,10 @@ class mmc_realtime:
 
             self.profiler.mark( 'post_join' )
 
-    def show( self, img, real_hwnd, new_xyxy ):
+    def show( self, img, real_hwnd, new_xyxy, frame_time_ns ):
         cv_title = self.cv_title_template%real_hwnd
         self.open_windows[ real_hwnd ] = cv_title
+        self._draw_hud( img, frame_time_ns )
         cv2.imshow( cv_title, img )
         #cv2.imshow( 'rec', img )
         self.profiler.mark( 'show_call')

@@ -34,3 +34,17 @@ def get_time_settings():
             }
     return time_settings
 
+def get_perf_settings():
+    perf_settings = {
+            # Enable half precision where supported by the backend/device.
+            'use-fp16': True,
+            # Inference workers can be pinned to these CPU cores (empty disables pinning).
+            'inference-affinity-cores': [],
+            # Capture / GUI process can be pinned separately (empty disables pinning).
+            'capture-gui-affinity-cores': [],
+            # Overlay HUD controls.
+            'hud-enabled': True,
+            # Processing delay warning threshold in milliseconds.
+            'sync-warning-ms': 150,
+            }
+    return perf_settings

@@ -466,7 +466,5 @@ class mmc_gui:
             self.rt.hwnds.append( self.known_hwnds[i][0] )
 
     def on_close( self ):
-        self.rt.detector_async.shutdown()
-        self.rt.running = False
+        self.rt.shutdown()
         sys.exit()
-
