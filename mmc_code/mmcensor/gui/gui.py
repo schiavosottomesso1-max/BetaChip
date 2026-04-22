@@ -128,9 +128,11 @@ class mmc_gui:
         tab_parent = ttk.Notebook( self.root )
         self.tab_decorate = ttk.Frame( tab_parent )
         self.tab_realtime = ttk.Frame( tab_parent )
-        
-        tab_parent.add( self.tab_decorate, text="Decorators" )
-        tab_parent.add( self.tab_realtime, text="Realtime" )
+        self.tab_telemetry = ttk.Frame( tab_parent )
+
+        tab_parent.add( self.tab_decorate,  text="Decorators" )
+        tab_parent.add( self.tab_realtime,  text="Realtime" )
+        tab_parent.add( self.tab_telemetry, text="Telemetry" )
         tab_parent.grid( row=2, column=0, sticky="nsew", padx=4, pady=4 )
 
         # ── Responsive tab grids ────────────────────────────────────────
@@ -139,6 +141,7 @@ class mmc_gui:
         self.tab_decorate.columnconfigure( 0, weight=1 )
         self.tab_decorate.columnconfigure( 1, weight=1 )
         self.tab_decorate.rowconfigure( 1, weight=1 )
+        self.tab_telemetry.columnconfigure( 0, weight=1 )
 
         #############################
         ## make realtime tab
@@ -250,6 +253,8 @@ class mmc_gui:
 
         self.decorator_config_frame = None
         self.decorator_being_configured = None
+
+        self._build_telemetry_tab()
 
         self.load_pushed()
         self.update_sizes()
@@ -476,6 +481,69 @@ class mmc_gui:
         self.rt.hwnds.clear()
         for i in chosen:
             self.rt.hwnds.append( self.known_hwnds[i][0] )
+
+    # ── Telemetry tab ──────────────────────────────────────────────────
+    def _build_telemetry_tab( self ):
+        """Build the Telemetry tab: a table of live HUD metrics + HUD toggle."""
+        outer = tk.Frame( self.tab_telemetry, bg=_BG )
+        outer.grid( row=0, column=0, sticky="nsew", padx=16, pady=12 )
+
+        # Metrics to display: (row, label text, StringVar)
+        self._tele_vars = {}
+        metrics = [
+            ( "FPS",              "fps"        ),
+            ( "Inference",        "infer"      ),
+            ( "Processing delay", "proc_delay" ),
+            ( "VRAM",             "vram"       ),
+            ( "SYNC",             "sync"       ),
+            ( "Timer precision",  "timer"      ),
+            ( "Resets",           "resets"     ),
+        ]
+        for i, ( label, key ) in enumerate( metrics ):
+            _lbl( outer, text=label + ":", font=_FONT_BOLD ).grid(
+                row=i, column=0, sticky="w", padx=4, pady=3 )
+            var = tk.StringVar( value="—" )
+            self._tele_vars[key] = var
+            _lbl( outer, textvariable=var ).grid( row=i, column=1, sticky="w", padx=12, pady=3 )
+
+        # Overlay HUD toggle
+        sep_row = len( metrics )
+        tk.Frame( outer, bg=_ROSE_GOLD, height=1 ).grid(
+            row=sep_row, column=0, columnspan=2, sticky="ew", pady=8 )
+        self._hud_var = tk.IntVar( value=int( self.rt.hud_enabled ) )
+        _chk( outer, text="Show overlay HUD (on cv2 windows)",
+              variable=self._hud_var, command=self._toggle_hud ).grid(
+            row=sep_row + 1, column=0, columnspan=2, sticky="w", padx=4 )
+
+        self._refresh_telemetry()
+
+    def _toggle_hud( self ):
+        self.rt.hud_enabled = bool( self._hud_var.get() )
+
+    def _refresh_telemetry( self ):
+        """Poll telemetry values from rt and update the labels every 500 ms."""
+        if not hasattr( self, '_tele_vars' ):
+            return
+        rt = self.rt
+
+        fps_text    = f"{rt.display_fps:.1f} FPS"
+        infer_ms    = rt.latest_inference_latency_ns / 1_000_000.0
+        proc_ms     = rt.latest_processing_delay_ns  / 1_000_000.0
+        sync_delay  = max( infer_ms, proc_ms )
+        warning     = sync_delay > rt.sync_warning_ms
+        sync_text   = f"{'⚠ WARN' if warning else '✓ OK'} ({sync_delay:.1f} ms)"
+        timer_text  = "1 ms" if rt._hi_res_timer_active else "default"
+        vram_text   = rt._cached_vram_text
+
+        self._tele_vars["fps"].set(        fps_text )
+        self._tele_vars["infer"].set(      f"{infer_ms:.1f} ms" )
+        self._tele_vars["proc_delay"].set( f"{proc_ms:.1f} ms" )
+        self._tele_vars["vram"].set(       vram_text )
+        self._tele_vars["sync"].set(       sync_text )
+        self._tele_vars["timer"].set(      timer_text )
+        self._tele_vars["resets"].set(     str( rt.reset_count ) )
+
+        self.root.after( 500, self._refresh_telemetry )
 
     def on_close( self ):
         self.rt.shutdown()
