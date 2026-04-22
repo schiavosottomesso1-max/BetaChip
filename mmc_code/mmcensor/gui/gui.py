@@ -157,11 +157,13 @@ class mmc_gui:
         self.screenshot_button = _btn( rt_btn_bar, text="Screenshot",  command=self.screenshot_pushed, state="disabled" )
         self.record_button     = _btn( rt_btn_bar, text="Record",      command=self.record_pushed,    state="disabled" )
         self.stop_record_button= _btn( rt_btn_bar, text="Stop Rec",    command=self.stop_record_pushed, state="disabled" )
+        self.reset_button      = _btn( rt_btn_bar, text="Reset",       command=self.reset_pushed,     state="disabled" )
         self.get_hwnds_button  = _btn( rt_btn_bar, text="Refresh Window List", command=self.refresh_hwnds )
 
         for col, btn in enumerate( [self.ready_button, self.start_button,
                                      self.stop_button, self.screenshot_button,
                                      self.record_button, self.stop_record_button,
+                                     self.reset_button,
                                      self.get_hwnds_button] ):
             btn.grid( row=0, column=col, padx=4 )
 
@@ -399,6 +401,7 @@ class mmc_gui:
     def make_ready_async( self ):
         self.rt.make_ready()
         self.start_button.config(state='normal')
+        self.reset_button.config(state='normal')
 
     def start_pushed( self ):
         self.start_button.config(state='disabled')
@@ -444,6 +447,15 @@ class mmc_gui:
 
     def stop_pushed( self ):
         self.rt.running = False
+
+    def reset_pushed( self ):
+        self.reset_button.config(state='disabled', text='⏳ Resetting…')
+        t = threading.Thread( target=self._reset_async, daemon=True )
+        t.start()
+
+    def _reset_async( self ):
+        self.rt.reset_runtime()
+        self.reset_button.config(state='normal', text='Reset')
 
     def refresh_hwnds( self ):
         print( 'refresh triggered' )
