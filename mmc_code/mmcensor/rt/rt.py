@@ -76,6 +76,35 @@ def _set_process_affinity(cores):
             return False
     return False
 
+def _begin_high_precision_timer():
+    """Set Windows multimedia timer resolution to 1 ms.
+
+    The default Windows timer slice is ~15.6 ms.  Any call to cv2.waitKey(1)
+    or time.sleep(<small value>) can silently stall for that long, causing
+    irregular frame delivery and the latency spikes described in the issue.
+    timeBeginPeriod(1) drops the system-wide timer resolution to 1 ms for
+    this process.  Must be paired with _end_high_precision_timer() on exit.
+
+    Returns True when the call succeeded, False otherwise (non-Windows or
+    winmm unavailable).
+    """
+    if os.name != 'nt':
+        return False
+    try:
+        result = ctypes.windll.winmm.timeBeginPeriod(1)
+        return result == 0  # TIMERR_NOERROR == 0
+    except Exception:
+        return False
+
+def _end_high_precision_timer():
+    """Restore default timer resolution.  Pair with _begin_high_precision_timer."""
+    if os.name != 'nt':
+        return
+    try:
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
+
 def get_dxcams():
     # this is in a function because the weird backdoor
     # I do doesn't work inside a class
@@ -521,6 +550,8 @@ class mmc_realtime:
         _disable_windows_quick_edit()
         self.perf_settings = mmc_config.get_perf_settings()
         _set_process_affinity(self.perf_settings.get('capture-gui-affinity-cores', []))
+        self._hi_res_timer_active = _begin_high_precision_timer()
+        self.reset_count = 0
         self.hud_enabled = bool(self.perf_settings.get('hud-enabled', True))
         self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 150))
         self.latest_inference_latency_ns = 0
@@ -778,6 +809,8 @@ class mmc_realtime:
             f'Infer: {self.latest_inference_latency_ns / 1_000_000.0:.1f} ms',
             self._query_vram_usage(),
             status_text,
+            'Timer: 1ms' if self._hi_res_timer_active else 'Timer: default',
+            f'Resets: {self.reset_count}',
         ]
         color = (0, 0, 255) if warning else (0, 255, 0)
         for idx, text in enumerate(lines):
@@ -787,6 +820,9 @@ class mmc_realtime:
 
     def shutdown( self ):
         self.running = False
+        if getattr(self, '_hi_res_timer_active', False):
+            _end_high_precision_timer()
+            self._hi_res_timer_active = False
         try:
             self.stop_recording()
         except Exception:
@@ -821,6 +857,67 @@ class mmc_realtime:
         self.time_safety_ns = mmc_config.get_time_settings()['time-safety'] * 1000 * 1000 * 1000
         self.detector_async.start()
         self.ready = True
+
+    def reset_runtime( self ):
+        """Hot-reset the inference worker without restarting the application.
+
+        Gracefully terminates the existing detector process, clears the shared
+        detection buffers and all timing state, re-applies CPU affinity for the
+        capture/GUI process, then immediately respawns the inference worker so
+        that detection resumes with a clean state.  The screencap shared-memory
+        segments are not touched; capture continues uninterrupted during the
+        reset.
+
+        Called from the main rendering loop when the user presses 'R'.
+        """
+        print( 'Hot reset #%d: shutting down detector...' % (self.reset_count + 1,) )
+
+        # Gracefully stop the existing inference worker.
+        try:
+            self.detector_async.shutdown()
+        except Exception as exc:
+            print( 'Hot reset: detector shutdown error: %s' % exc )
+
+        # Zero out the detection shared-memory buffers so stale data is not
+        # rendered before the new worker produces its first result.
+        try:
+            self.box_info_np[:] = 0
+            self.box_hwnds_np[:] = 0
+        except Exception:
+            pass
+
+        # Reset all detection/timing state.
+        self.last_detection_found = 0
+        self.hwnd_times = {}
+        self.boxes_hwnd_index = {}
+        self.boxes = np.ndarray( (50, 20000, 8), dtype=np.int64 )
+        self.size_detection_timings = {}
+        self.size_delays = {}
+        self.display_fps = 0.0
+        self._last_display_tick_ns = 0
+        self._future_frame_warned = False
+
+        # Re-apply CPU affinity for the capture/GUI process so the OS
+        # does not migrate it to low-power efficiency cores during the pause.
+        _set_process_affinity( self.perf_settings.get('capture-gui-affinity-cores', []) )
+
+        # Capture the active sizes before creating the new manager list.
+        current_sizes = list( self.sizes )
+
+        # Respawn the inference worker, reusing the same shared-memory segments.
+        print( 'Hot reset: respawning detector...' )
+        self.detector_async = mmc_detect_loop_async()
+        self.detector_async.initialize(
+            self.sc.img_shm_name, self.sc.img_coords_name, self.sc.img_ref_name,
+            self.sc.img_shape, current_sizes,
+            self.boxes_shm_name, self.box_hwnds_shm_name, self.box_info_shm_name,
+        )
+        # Point self.sizes at the new manager's list so update_sizes() keeps working.
+        self.sizes = self.detector_async.sizes
+        self.detector_async.start()
+
+        self.reset_count += 1
+        print( 'Hot reset complete (reset #%d)' % self.reset_count )
 
     def go_decorate( self ):
         if not self.ready:
@@ -1085,7 +1182,17 @@ class mmc_realtime:
 
             self.profiler.mark( 'post_fps' )
 
-            if( cv2.waitKey(1) == ord('q') or self.running == False ):
+            key = cv2.waitKey(1)
+
+            # 'R' / 'r' — hot-reset the inference worker at runtime.
+            if key == ord('r') or key == ord('R'):
+                # Wait for the current snap thread before resetting so it
+                # cannot write into shared memory mid-reset.
+                if t1.is_alive():
+                    t1.join()
+                self.reset_runtime()
+
+            if( key == ord('q') or self.running == False ):
                 cv2.destroyAllWindows()
                 self.open_windows = {}
                 if t1.is_alive():
