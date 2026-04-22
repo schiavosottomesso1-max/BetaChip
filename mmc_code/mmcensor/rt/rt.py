@@ -105,7 +105,109 @@ def _end_high_precision_timer():
     except Exception:
         pass
 
-def get_dxcams():
+def _set_high_priority_class():
+    """Raise the current process to HIGH_PRIORITY_CLASS on Windows.
+
+    Prevents the Windows scheduler from de-prioritising the AI inference
+    worker when the application window loses focus.  Returns True on
+    success, False otherwise (non-Windows or permission denied).
+    """
+    if os.name != 'nt':
+        return False
+    try:
+        HIGH_PRIORITY_CLASS = 0x00000080
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetCurrentProcess()
+        return bool(kernel32.SetPriorityClass(handle, HIGH_PRIORITY_CLASS))
+    except Exception:
+        return False
+
+def _check_hags_enabled():
+    """Return True/False/None for HAGS state on Windows.
+
+    Hardware-Accelerated GPU Scheduling (HAGS) significantly reduces
+    GPU latency on RTX 30-series cards.  Reads the registry key
+    HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\\HwSchMode:
+      2 → enabled, anything else → disabled.
+    Returns None when the check cannot be performed (non-Windows, no access).
+    """
+    if os.name != 'nt':
+        return None
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r'SYSTEM\CurrentControlSet\Control\GraphicsDrivers',
+            0, winreg.KEY_READ,
+        )
+        value, _ = winreg.QueryValueEx(key, 'HwSchMode')
+        winreg.CloseKey(key)
+        return value == 2
+    except OSError:
+        return None
+    except Exception:
+        return None
+
+def _create_optimized_cuda_ort_session(onnx_path, perf_settings):
+    """Create an onnxruntime InferenceSession using the CUDA EP with tuned options.
+
+    Provider options applied:
+      - cudnn_conv_algo_search   → HEURISTIC (consistent fast startup)
+      - cudnn_conv_use_max_workspace → 1 (use fastest cuDNN kernels)
+      - arena_extend_strategy   → kNextPowerOfTwo (fewer VirtualAlloc calls)
+      - gpu_mem_limit            → configurable (default 8 GB)
+
+    Returns the InferenceSession on success, None on failure (onnxruntime
+    unavailable, CUDA EP not present, file not found, etc.).
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        print('cuda-onnx: onnxruntime not installed; falling back to PyTorch backend')
+        return None
+    algo_search = str(perf_settings.get('cudnn-conv-algo-search', 'HEURISTIC'))
+    max_workspace = '1' if perf_settings.get('cudnn-conv-max-workspace', True) else '0'
+    arena_strategy = str(perf_settings.get('arena-extend-strategy', 'kNextPowerOfTwo'))
+    gpu_mem_limit = int(perf_settings.get('gpu-mem-limit-bytes', 8 * 1024 * 1024 * 1024))
+    cuda_ep_options = {
+        'cudnn_conv_algo_search':      algo_search,
+        'cudnn_conv_use_max_workspace': max_workspace,
+        'arena_extend_strategy':       arena_strategy,
+        'gpu_mem_limit':               str(gpu_mem_limit),
+        'do_copy_in_default_stream':   '1',
+    }
+    providers = [('CUDAExecutionProvider', cuda_ep_options), 'CPUExecutionProvider']
+    try:
+        session = ort.InferenceSession(onnx_path, providers=providers)
+        active = [ep for ep in session.get_providers() if 'CUDA' in ep]
+        if not active:
+            print('cuda-onnx: CUDA EP not active (driver/hardware issue?); session uses CPU fallback')
+        else:
+            print('cuda-onnx: CUDA EP active with %s cuDNN search, %s arena, %d MB GPU limit'
+                  % (algo_search, arena_strategy, gpu_mem_limit // (1024 * 1024)))
+        return session
+    except Exception as exc:
+        print('cuda-onnx: could not create optimized CUDA ORT session (%s); falling back' % exc)
+        return None
+
+def _replace_yolo_ort_session(model, new_session):
+    """Swap the onnxruntime session inside an ultralytics YOLO ONNX predictor.
+
+    The predictor is only initialised after the first predict() call.
+    Returns True when the replacement succeeded.
+    """
+    try:
+        if (model is not None
+                and getattr(model, 'predictor', None) is not None
+                and getattr(model.predictor, 'model', None) is not None
+                and hasattr(model.predictor.model, 'session')):
+            model.predictor.model.session = new_session
+            return True
+    except Exception:
+        pass
+    return False
+
+
     # this is in a function because the weird backdoor
     # I do doesn't work inside a class
     # all of this is horrible and dxcam should just expose
@@ -317,9 +419,14 @@ class mmc_detect_loop_class:
         self.perf_settings = mmc_config.get_perf_settings()
         self.use_fp16 = bool(self.perf_settings.get('use-fp16', True))
         _set_process_affinity(self.perf_settings.get('inference-affinity-cores', []))
+        if not _set_high_priority_class():
+            print( 'inference worker: could not raise process priority (non-Windows or permission denied)' )
         self.last_t = 0
         self.fps_limit = 300
         self.last_detect_finish = 0
+
+        # Track ONNX paths for 'cuda-onnx' env so we can swap the session after warmup.
+        self._cuda_onnx_paths = {}
 
         self.models = {}
         for size in mmc_const.supported_sizes:
@@ -328,6 +435,16 @@ class mmc_detect_loop_class:
             elif self.env == 'directml':
                 onnx_path = "../neuralnet_models/640m.onnx"
                 model = YOLO( onnx_path, task='detect' )
+            elif self.env == 'cuda-onnx':
+                # Load via ultralytics so we reuse its preprocessing and postprocessing.
+                # After warmup below, the internal onnxruntime session will be replaced
+                # with one that uses the optimized CUDA EP provider options.
+                onnx_path = "../neuralnet_models/640m.onnx"
+                if os.path.isfile( onnx_path ):
+                    model = YOLO( onnx_path, task='detect' )
+                    self._cuda_onnx_paths[size] = onnx_path
+                else:
+                    model = None
             elif self.env == 'tensorrt':
                 engine_path = "../neuralnet_models/640m-%d.engine"%size
                 if os.path.isfile( engine_path ):
@@ -350,11 +467,41 @@ class mmc_detect_loop_class:
             if model is not None:
                 self.models[size] = model
 
+        # --- GPU engine prime -----------------------------------------------
+        # Run multiple dummy inferences per resolution so that CUDA allocates
+        # all necessary kernels and memory arenas before the real-time loop
+        # starts.  The first real frame would otherwise cause a large spike.
+        n_warmup = max(1, int(self.perf_settings.get('warmup-iterations', 10)))
         warmup_img = np.full( ( 2560, 2560, 3 ), 127, dtype=np.uint8 )
         for size in self.models:
             model = self.get_model_for_size( size )
             if model is not None:
-                self.get_model_for_size(size).predict(warmup_img, imgsz=size, verbose=False )
+                print( 'priming GPU engine: resolution %d (%d iterations)...' % (size, n_warmup) )
+                for _ in range( n_warmup ):
+                    model.predict(warmup_img, imgsz=size, verbose=False)
+
+        # --- cuda-onnx: swap session with optimized CUDA EP session ----------
+        # At this point the ultralytics predictor has been fully initialised
+        # (the warmup calls above trigger predictor creation).  Replace the
+        # internal onnxruntime session with one configured for deterministic
+        # cuDNN algorithm selection and large memory arenas.
+        if self.env == 'cuda-onnx':
+            for size, model in self.models.items():
+                onnx_path = self._cuda_onnx_paths.get( size )
+                if onnx_path is None:
+                    continue
+                new_session = _create_optimized_cuda_ort_session( onnx_path, self.perf_settings )
+                if new_session is not None:
+                    replaced = _replace_yolo_ort_session( model, new_session )
+                    if replaced:
+                        # Re-prime with the new session so its memory arenas are warmed up.
+                        print( 'cuda-onnx: re-priming with optimized session at resolution %d...' % size )
+                        for _ in range( n_warmup ):
+                            model.predict(warmup_img, imgsz=size, verbose=False)
+                    else:
+                        print( 'cuda-onnx: session replacement unsupported in this ultralytics version; '
+                               'optimized CUDA EP options may not be active' )
+        # --------------------------------------------------------------------
 
         self.img_shape = img_shape
 
@@ -552,6 +699,18 @@ class mmc_realtime:
         _set_process_affinity(self.perf_settings.get('capture-gui-affinity-cores', []))
         self._hi_res_timer_active = _begin_high_precision_timer()
         self.reset_count = 0
+
+        # Warn when Hardware-Accelerated GPU Scheduling (HAGS) is disabled.
+        # HAGS significantly reduces GPU command-queue latency on RTX 30-series
+        # cards and should be enabled in Windows Display settings.
+        hags = _check_hags_enabled()
+        if hags is False:
+            print( 'WARNING: Hardware-Accelerated GPU Scheduling (HAGS) is DISABLED. '
+                   'Enable it in Windows Settings → Display → Graphics → Default GPU '
+                   'settings for lower latency on RTX 30-series GPUs.' )
+        elif hags is True:
+            print( 'HAGS: enabled.' )
+
         self.hud_enabled = bool(self.perf_settings.get('hud-enabled', True))
         self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 150))
         self.latest_inference_latency_ns = 0
