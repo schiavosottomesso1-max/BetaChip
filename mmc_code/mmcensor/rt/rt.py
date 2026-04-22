@@ -22,6 +22,11 @@ import mmcensor.nn as nn
 import statistics
 from datetime import datetime
 
+NS_PER_SECOND = 1_000_000_000
+VRAM_QUERY_CACHE_NS = NS_PER_SECOND
+MIN_FPS_INTERVAL_NS = 1_000_000
+FPS_EMA_ALPHA = 0.15
+
 def _disable_windows_quick_edit():
     if os.name != 'nt':
         return
@@ -341,6 +346,16 @@ class mmc_detect_loop_class:
     def get_model_for_size( self, size ):
         return self.models[ size ]
 
+    def _write_box_info(self, sstime, num_hwnds, sizes_key, write_time_ns, inference_latency_ns):
+        self.box_info_np[0] = sstime
+        self.box_info_np[1] = num_hwnds
+        self.box_info_np[2] = sizes_key
+        self.box_info_np[3] = write_time_ns
+        self.box_info_np[4] = inference_latency_ns
+        self.box_info_np[5] = write_time_ns - sstime
+        self.box_info_np[6] = sstime
+        self.box_info_np[7] = 0  # reserved for future telemetry extension
+
     def go_detect( self ):
         n = 0
         t_start = time.perf_counter()
@@ -386,7 +401,6 @@ class mmc_detect_loop_class:
                     self.profiler.mark( "done_predict" )
                     write_time_ns = time.perf_counter_ns()
                     inference_latency_ns = write_time_ns - detect_started_ns
-                    self.box_info_np[0] = sstime
                     i=0
                     for hwnd in outs:
                         j=0
@@ -398,25 +412,24 @@ class mmc_detect_loop_class:
                         self.box_hwnds_np[i]=(hwnd,j,self.img_coords[i][2]-self.img_coords[i][0],self.img_coords[i][3]-self.img_coords[i][1])
                         self.profiler.mark( "wrote_hwnds" )
                         i=i+1
-                    self.box_info_np[1] = i
-                    self.box_info_np[2] = nn.sizes_to_key( self.sizes )
-                    self.box_info_np[3] = write_time_ns
-                    self.box_info_np[4] = inference_latency_ns
-                    self.box_info_np[5] = write_time_ns - sstime
-                    self.box_info_np[6] = sstime
-                    self.box_info_np[7] = 0
+                    self._write_box_info(
+                        sstime=sstime,
+                        num_hwnds=i,
+                        sizes_key=nn.sizes_to_key(self.sizes),
+                        write_time_ns=write_time_ns,
+                        inference_latency_ns=inference_latency_ns
+                    )
 
                     self.profiler.mark( "done_outs" )
                 else:
                     write_time_ns = time.perf_counter_ns()
-                    self.box_info_np[0] = sstime
-                    self.box_info_np[1] = 0
-                    self.box_info_np[2] = nn.sizes_to_key( self.sizes )
-                    self.box_info_np[3] = write_time_ns
-                    self.box_info_np[4] = write_time_ns - detect_started_ns
-                    self.box_info_np[5] = write_time_ns - sstime
-                    self.box_info_np[6] = sstime
-                    self.box_info_np[7] = 0
+                    self._write_box_info(
+                        sstime=sstime,
+                        num_hwnds=0,
+                        sizes_key=nn.sizes_to_key(self.sizes),
+                        write_time_ns=write_time_ns,
+                        inference_latency_ns=write_time_ns - detect_started_ns
+                    )
 
                 self.last_t = sstime
 
@@ -514,6 +527,8 @@ class mmc_realtime:
         self._last_display_tick_ns = 0
         self._cached_vram_text = 'VRAM: n/a'
         self._last_vram_query_ns = 0
+        self._vram_query_timeout_s = float(self.perf_settings.get('vram-query-timeout-s', 0.8))
+        self._future_frame_warned = False
 
         self.sc = mmc_screencap()
         self.sc.initialize()
@@ -706,31 +721,40 @@ class mmc_realtime:
 
     def _query_vram_usage( self ):
         now_ns = time.perf_counter_ns()
-        if now_ns - self._last_vram_query_ns < 1000 * 1000 * 1000:
+        if now_ns - self._last_vram_query_ns < VRAM_QUERY_CACHE_NS:
             return self._cached_vram_text
         self._last_vram_query_ns = now_ns
         try:
             result = subprocess.run(
                 [ 'nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits' ],
                 capture_output=True,
-                timeout=0.8
+                timeout=self._vram_query_timeout_s
             )
             if result.returncode != 0:
+                self._cached_vram_text = 'VRAM: n/a (nvidia-smi error)'
                 return self._cached_vram_text
-            first_line = result.stdout.decode(errors='replace').strip().splitlines()[0]
+            lines = result.stdout.decode(errors='replace').strip().splitlines()
+            if not lines:
+                self._cached_vram_text = 'VRAM: n/a'
+                return self._cached_vram_text
+            first_line = lines[0]
             used_s, total_s = [x.strip() for x in first_line.split(',')[:2]]
             used = int(used_s)
             total = int(total_s)
             pct = 100.0 * used / total if total else 0.0
             self._cached_vram_text = f'VRAM: {used}/{total} MB ({pct:.0f}%)'
         except Exception:
-            pass
+            self._cached_vram_text = 'VRAM: n/a (nvidia-smi unavailable)'
         return self._cached_vram_text
 
     def _draw_hud( self, img, frame_time_ns ):
         if not self.hud_enabled or img is None or img.size == 0:
             return
-        frame_age_ms = max(0.0, (time.perf_counter_ns() - frame_time_ns) / 1_000_000.0)
+        now_ns = time.perf_counter_ns()
+        if frame_time_ns > now_ns and not self._future_frame_warned:
+            self._future_frame_warned = True
+            print('WARNING: frame timestamp is ahead of local clock; clamping frame age to 0ms')
+        frame_age_ms = max(0.0, (now_ns - frame_time_ns) / 1_000_000.0)
         detector_delay_ms = max(0.0, self.latest_processing_delay_ns / 1_000_000.0)
         sync_delay_ms = max(frame_age_ms, detector_delay_ms)
         warning = sync_delay_ms > self.sync_warning_ms
@@ -833,8 +857,7 @@ class mmc_realtime:
             self.profiler.mark( 'copied_img' )
 
             img_buffer.append( [ t_snapped, img_collection ] )
-            if len(img_buffer) > 1:
-                img_buffer[:] = img_buffer[-1:]
+            img_buffer[:] = [img_buffer[-1]]
 
             self.profiler.mark( 'appended_buffer' )
 
@@ -864,6 +887,8 @@ class mmc_realtime:
             self.profiler.mark( 'popped_old' )
 
             # eliminate old detections
+            if not img_buffer:
+                continue
             to_show_time_ns = img_buffer[-1][0]
             oldest_detection = to_show_time_ns - self.time_safety_ns
             latest_detection = to_show_time_ns + self.time_safety_ns
@@ -959,8 +984,8 @@ class mmc_realtime:
 
                 now_ns = time.perf_counter_ns()
                 if self._last_display_tick_ns:
-                    inst_fps = 1_000_000_000.0 / max(1, now_ns - self._last_display_tick_ns)
-                    self.display_fps = inst_fps if self.display_fps == 0 else (0.85 * self.display_fps + 0.15 * inst_fps)
+                    inst_fps = NS_PER_SECOND / max(MIN_FPS_INTERVAL_NS, now_ns - self._last_display_tick_ns)
+                    self.display_fps = inst_fps if self.display_fps == 0 else ((1.0 - FPS_EMA_ALPHA) * self.display_fps + FPS_EMA_ALPHA * inst_fps)
                 self._last_display_tick_ns = now_ns
                 self.show( self.to_show[ hwnd ], hwnd, new_xyxy, to_show_time_ns )
                 self.profiler.mark( 'showed' )

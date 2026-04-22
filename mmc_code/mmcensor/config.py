@@ -46,5 +46,7 @@ def get_perf_settings():
             'hud-enabled': True,
             # Processing delay warning threshold in milliseconds.
             'sync-warning-ms': 150,
+            # Timeout for one VRAM polling call via nvidia-smi.
+            'vram-query-timeout-s': 0.8,
             }
     return perf_settings
