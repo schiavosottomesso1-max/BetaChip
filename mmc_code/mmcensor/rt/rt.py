@@ -1238,8 +1238,6 @@ class mmc_realtime:
                 _w = new_xyxy[2]-new_xyxy[0]
                 if hwnd not in self.to_show or self.to_show[hwnd] is None or self.to_show[hwnd].shape[:2] != (_h, _w):
                     self.to_show[hwnd] = np.full( (_h, _w, 3), 127, dtype=np.uint8 )
-                else:
-                    self.to_show[hwnd].fill( 127 )
                 self.profiler.mark( 'post_full' )
 
                 if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0]:
