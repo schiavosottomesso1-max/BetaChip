@@ -208,11 +208,12 @@ def _replace_yolo_ort_session(model, new_session):
     return False
 
 
-    # this is in a function because the weird backdoor
-    # I do doesn't work inside a class
-    # all of this is horrible and dxcam should just expose
-    # the data I need.
-    # I apologize for all of this
+# this is in a function because the weird backdoor
+# I do doesn't work inside a class
+# all of this is horrible and dxcam should just expose
+# the data I need.
+# I apologize for all of this
+def get_dxcams():
     cams = []
     outputs = dxcam.__factory.outputs
     for i in range(len(outputs)):
