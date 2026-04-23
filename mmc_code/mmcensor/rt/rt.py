@@ -1149,19 +1149,31 @@ class mmc_realtime:
             self.profiler.mark( 'appended_buffer' )
 
             delay_key = ( len( self.hwnds ), nn.sizes_to_key( self.sizes ) )
-            if delay_key in self.size_delays:
+            if delay_key[1] == 0:
+                # No nets active — the detector has no inference to run so the
+                # only pipeline overhead is IPC latency (~1 ms).  A small fixed
+                # delay is sufficient to satisfy the straddle check without
+                # inflating the displayed sync unnecessarily.
+                delay = 30_000_000  # 30 ms
+            elif delay_key in self.size_delays:
                 delay = self.size_delays[ delay_key ]
             else:
                 if delay_key in self.size_detection_timings:
+                    avg = sum( self.size_detection_timings[delay_key] ) / len( self.size_detection_timings[delay_key] )
+                    # 1.5× average interval + 20 ms fixed jitter buffer.
+                    # The straddle check only requires delay > one inference
+                    # cycle; 1.5× provides a 50 % margin for timing variance
+                    # without inflating sync by the full time_safety window.
+                    calibrated_delay = 1.5 * avg + 20_000_000
                     if len( self.size_detection_timings[ delay_key ] ) > 15 or ( len(self.size_detection_timings[delay_key] ) > 4 and sum( self.size_detection_timings[delay_key] ) > 4 * 1000000000 ):
                         print( self.size_detection_timings[ delay_key ] )
-                        delay = 2.2 * sum( self.size_detection_timings[delay_key] ) / len( self.size_detection_timings[delay_key] ) + self.time_safety_ns/2
+                        delay = calibrated_delay
                         self.size_delays[delay_key] = delay
                         print( 'delay set to %.3fs'%(delay/1000000000,) )
                     else:
                         # Use the running average of collected samples as a live
                         # estimate so sync never spikes to 3 s during calibration.
-                        delay = 2.2 * sum( self.size_detection_timings[delay_key] ) / len( self.size_detection_timings[delay_key] ) + self.time_safety_ns/2
+                        delay = calibrated_delay
                         if delay_key not in self.delay_key_print_history or len(self.delay_key_print_history[ delay_key ]) != len(self.size_detection_timings[ delay_key ]):
                             print( "calculating delay....", self.size_detection_timings[delay_key] )
                             self.delay_key_print_history[ delay_key ] = self.size_detection_timings[ delay_key ].copy()

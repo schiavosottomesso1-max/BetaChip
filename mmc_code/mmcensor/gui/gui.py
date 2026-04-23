@@ -277,10 +277,10 @@ class mmc_gui:
             font=("Arial", 46, "bold"), fill=_ACCENT, anchor="center" )
 
     def up( self ):
-        self.root.attributes( '-topmost', True )
+        self.root.after( 0, lambda: self.root.attributes( '-topmost', True ) )
 
     def down( self ):
-        self.root.attributes( '-topmost', False )
+        self.root.after( 0, lambda: self.root.attributes( '-topmost', False ) )
 
     def update_sizes( self ):
         sizes = []
@@ -405,8 +405,8 @@ class mmc_gui:
 
     def make_ready_async( self ):
         self.rt.make_ready()
-        self.start_button.config(state='normal')
-        self.reset_button.config(state='normal')
+        self.root.after( 0, lambda: self.start_button.config(state='normal') )
+        self.root.after( 0, lambda: self.reset_button.config(state='normal') )
 
     def start_pushed( self ):
         self.start_button.config(state='disabled')
@@ -419,11 +419,13 @@ class mmc_gui:
 
     def start_async( self ):
         self.rt.go_decorate()
-        self.start_button.config(state='normal')
-        self.screenshot_button.config(state='disabled')
-        self.stop_button.config(state='disabled')
-        self.record_button.config(state='disabled')
-        self.stop_record_button.config(state='disabled')
+        def _on_stop():
+            self.start_button.config(state='normal')
+            self.screenshot_button.config(state='disabled')
+            self.stop_button.config(state='disabled')
+            self.record_button.config(state='disabled')
+            self.stop_record_button.config(state='disabled')
+        self.root.after( 0, _on_stop )
 
     def screenshot_pushed( self ):
         self.rt.take_screenshot()
@@ -447,8 +449,8 @@ class mmc_gui:
 
     def _stop_record_async( self ):
         self.rt.stop_recording()          # blocks while audio thread joins + ffmpeg muxes
-        self.stop_record_button.config( state='disabled', text='Stop Rec', bg=_ACCENT )
-        self.record_button.config( state='normal' )
+        self.root.after( 0, lambda: self.stop_record_button.config( state='disabled', text='Stop Rec', bg=_ACCENT ) )
+        self.root.after( 0, lambda: self.record_button.config( state='normal' ) )
 
     def stop_pushed( self ):
         self.rt.running = False
@@ -460,7 +462,7 @@ class mmc_gui:
 
     def _reset_async( self ):
         self.rt.reset_runtime()
-        self.reset_button.config(state='normal', text='Reset')
+        self.root.after( 0, lambda: self.reset_button.config(state='normal', text='Reset') )
 
     def refresh_hwnds( self ):
         print( 'refresh triggered' )
