@@ -1109,6 +1109,18 @@ class mmc_realtime:
         except AttributeError:
             pass
 
+        # Persistent snap thread reference so each iteration can check whether
+        # the previous snap has finished before starting a new one.  This
+        # prevents the render loop from blocking indefinitely when the OS
+        # screenshot API (DWM / mss) is slow — which happens, e.g., when the
+        # user scrolls a background window while the GUI is in the foreground.
+        # A completed dummy thread is used as the initial sentinel so that the
+        # first real loop iteration always starts a snap immediately.
+        _sentinel = threading.Thread(target=lambda: None)
+        _sentinel.start()
+        _sentinel.join()
+        t1 = _sentinel
+
         while( True ):
             self.profiler.loop()
 
@@ -1116,14 +1128,19 @@ class mmc_realtime:
                 print( "DETECTOR THREAD FAILED.  EXITING.  PLEASE REPORT ANY ERRORS PRINTED ABOVE." )
                 sys.exit()
 
-            t1 = threading.Thread( target=self.sc.snap_hwnds, args = [ self.hwnds ] )
-            if self.threaded_screenshot:
-                t1.start()
-            else:
-                t1.run()
+            # Only start a new snap if the previous snap thread has finished.
+            # If the previous snap is still running (e.g. DWM/mss slow during
+            # scroll), we skip starting a new one and reuse the last captured
+            # frame for this render iteration.  This prevents the render loop
+            # from stalling and keeps cv2.waitKey pumping the message queue.
+            if not t1.is_alive():
+                t1 = threading.Thread( target=self.sc.snap_hwnds, args = [ self.hwnds ] )
+                if self.threaded_screenshot:
+                    t1.start()
+                else:
+                    t1.run()
 
             self.profiler.mark('after_snap')
-
             num_snapped = self.sc.img_ref[1]
             t_snapped = self.sc.img_ref[0]
 
@@ -1181,7 +1198,12 @@ class mmc_realtime:
                     if delay_key not in self.delay_key_print_history or self.delay_key_print_history[ delay_key ] != []:
                         self.delay_key_print_history[ delay_key ] = []
                         print( "calculating delay...." )
-                    delay = self.time_safety_ns * 2
+                    # Use time_safety_ns as the cold-start fallback (not ×2).
+                    # ×2 (300 ms) was overly conservative and caused a visible
+                    # gray period when activating any new net size.  time_safety_ns
+                    # (150 ms default) still guarantees enough buffer for the
+                    # first detection cycle to complete before a frame is shown.
+                    delay = self.time_safety_ns
 
             oldest_keep_img = time.perf_counter_ns() - delay
 
@@ -1372,23 +1394,30 @@ class mmc_realtime:
             # 'R' / 'r' — hot-reset the inference worker at runtime.
             if key == ord('r') or key == ord('R'):
                 # Wait for the current snap thread before resetting so it
-                # cannot write into shared memory mid-reset.
+                # cannot write into shared memory mid-reset.  Use a timeout
+                # so that a stalled snap thread (e.g. DWM busy during scroll)
+                # does not block the reset indefinitely.
                 if t1.is_alive():
-                    t1.join()
+                    t1.join( timeout=0.5 )
                 self.reset_runtime()
 
             if( key == ord('q') or self.running == False ):
                 cv2.destroyAllWindows()
                 self.open_windows = {}
                 if t1.is_alive():
-                    t1.join()
+                    t1.join( timeout=0.5 )
                 self.stop_recording()
                 break
 
             self.profiler.mark( 'post_wait' )
 
+            # Wait for the snap thread to finish before starting the next
+            # iteration's snap.  Use a short timeout so the render loop never
+            # blocks indefinitely if the snap thread is stuck.  If the timeout
+            # expires, the next iteration will detect t1.is_alive() == True
+            # and skip starting a new snap, reusing the previous frame instead.
             if t1.is_alive():
-                t1.join()
+                t1.join( timeout=0.3 )
 
             self.profiler.mark( 'post_join' )
 
