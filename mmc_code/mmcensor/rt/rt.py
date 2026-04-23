@@ -1198,12 +1198,15 @@ class mmc_realtime:
                     if delay_key not in self.delay_key_print_history or self.delay_key_print_history[ delay_key ] != []:
                         self.delay_key_print_history[ delay_key ] = []
                         print( "calculating delay...." )
-                    # Use time_safety_ns as the cold-start fallback (not ×2).
-                    # ×2 (300 ms) was overly conservative and caused a visible
-                    # gray period when activating any new net size.  time_safety_ns
-                    # (150 ms default) still guarantees enough buffer for the
-                    # first detection cycle to complete before a frame is shown.
-                    delay = self.time_safety_ns
+                    # Use time_safety_ns × 2 (300 ms by default) as the
+                    # cold-start fallback.  The straddle check requires
+                    # delay > inference_latency so that the latest detection's
+                    # snap timestamp is still newer than the display frame.
+                    # For fast nets (640, ~50 ms) 300 ms is amply conservative.
+                    # For slow nets (1280, ~200 ms) values below the inference
+                    # time cause a permanent gray screen; 300 ms keeps them
+                    # working until the calibration loop provides a real estimate.
+                    delay = self.time_safety_ns * 2
 
             oldest_keep_img = time.perf_counter_ns() - delay
 
