@@ -1150,10 +1150,12 @@ class mmc_realtime:
                         self.size_delays[delay_key] = delay
                         print( 'delay set to %.3fs'%(delay/1000000000,) )
                     else:
+                        # Use the running average of collected samples as a live
+                        # estimate so sync never spikes to 3 s during calibration.
+                        delay = 2.2 * sum( self.size_detection_timings[delay_key] ) / len( self.size_detection_timings[delay_key] ) + self.time_safety_ns/2
                         if delay_key not in self.delay_key_print_history or len(self.delay_key_print_history[ delay_key ]) != len(self.size_detection_timings[ delay_key ]):
                             print( "calculating delay....", self.size_detection_timings[delay_key] )
                             self.delay_key_print_history[ delay_key ] = self.size_detection_timings[ delay_key ].copy()
-                            delay = 3*1000000000
                 else:
                     if delay_key not in self.delay_key_print_history or self.delay_key_print_history[ delay_key ] != []:
                         self.delay_key_print_history[ delay_key ] = []
