@@ -379,9 +379,9 @@ class mmc_screencap:
 class mmc_detect_loop_async:
 
     def initialize( self, img_shm_name, img_coords_name, img_ref_name, img_shape, sizes, boxes_shm_name, box_hwnds_shm_name, box_info_shm_name ):
-        manager = Manager()
-        self.sizes = manager.list()
-        self.state = manager.list()
+        self._manager = Manager()
+        self.sizes = self._manager.list()
+        self.state = self._manager.list()
         self.state.append( 0 )  # ready
         self.state.append( 0 )  # stop
         self.sizes.extend( sizes )
@@ -404,6 +404,13 @@ class mmc_detect_loop_async:
             if self.P1.is_alive():
                 self.P1.terminate()
                 self.P1.join()
+        # Shut down the Manager process that backs self.sizes / self.state.
+        # Without this, each reset leaks one Manager OS process, causing
+        # cumulative slowdown after several net switches.
+        try:
+            self._manager.shutdown()
+        except Exception:
+            pass
 
 def mmc_detect_loop_remote( sizes, state, img_shm_name, img_coords_name, img_ref_name, img_shape, boxes_shm_name, box_hwnds_shm_name, box_info_shm_name):
     detector = mmc_detect_loop_class()
