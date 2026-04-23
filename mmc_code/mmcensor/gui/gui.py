@@ -416,6 +416,11 @@ class mmc_gui:
         self.screenshot_button.config(state='normal')
         self.stop_button.config(state='normal')
         self.record_button.config(state='normal')
+        # Minimize the GUI window so the Tkinter compositor (DWM) does not
+        # compete with dxcam's DXGI Desktop Duplication pipeline.  When the
+        # GUI is in the foreground, DWM rendering load can delay DXGI frame
+        # acquisition by hundreds of milliseconds, inflating sync.
+        self.root.iconify()
 
     def start_async( self ):
         self.rt.go_decorate()
@@ -425,6 +430,7 @@ class mmc_gui:
             self.stop_button.config(state='disabled')
             self.record_button.config(state='disabled')
             self.stop_record_button.config(state='disabled')
+            self.root.deiconify()  # restore GUI window after capture stops
         self.root.after( 0, _on_stop )
 
     def screenshot_pushed( self ):

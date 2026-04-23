@@ -400,7 +400,7 @@ class mmc_detect_loop_async:
                 self.state[1] = 1
             except Exception:
                 pass
-            self.P1.join(timeout=3.0)
+            self.P1.join(timeout=15.0)
             if self.P1.is_alive():
                 self.P1.terminate()
                 self.P1.join()
@@ -1228,7 +1228,13 @@ class mmc_realtime:
             # frame's timestamp.  img_buffer[-1] is used only for the live hwnd list
             # and overlay-window positioning (new_xyxy).
             to_show_time_ns = img_buffer[0][0]
-            oldest_detection = to_show_time_ns - self.time_safety_ns
+            # Widen the detection retention window to at least one full
+            # inference cycle.  For slow nets (1280, 1920, 2560) the default
+            # time_safety_ns (150 ms) may be shorter than the inference
+            # interval, causing the oldest stored detection to be trimmed
+            # before the straddle check can use it.
+            _infer_ns = max(self.latest_inference_latency_ns, self.time_safety_ns)
+            oldest_detection = to_show_time_ns - _infer_ns
             latest_detection = to_show_time_ns + self.time_safety_ns
             for hwnd in self.hwnd_times:
                 popped = False
@@ -1292,7 +1298,13 @@ class mmc_realtime:
                     self.to_show[hwnd] = np.full( (_h, _w, 3), 127, dtype=np.uint8 )
                 self.profiler.mark( 'post_full' )
 
-                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0]:
+                # Straddle check: the oldest stored detection must be before
+                # the display frame (oldest < display) and the newest must be
+                # within one inference cycle AFTER or BEFORE the display frame.
+                # The _infer_ns slack prevents momentary gray frames when an
+                # inference cycle takes slightly longer than the calibrated
+                # average (common on 1280/1920/2560 nets).
+                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0] - _infer_ns:
                     old_xyxy = img_buffer[0][1][hwnd][1]
                     self.profiler.mark( 'got_old_xyxy' )
                     min_h = min( old_xyxy[3] - old_xyxy[1], new_xyxy[3] - new_xyxy[1] )
