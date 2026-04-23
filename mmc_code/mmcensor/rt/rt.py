@@ -760,6 +760,7 @@ class mmc_realtime:
         self.boxes_hwnd_index = {}
         self.hwnd_times = {} # hwnd: [ t, first_index, last_index ]
         self.last_detection_found = 0
+        self.last_detection_delay_key = None
 
         self.detector_async = mmc_detect_loop_async()
         self.detector_async.initialize( self.sc.img_shm_name, self.sc.img_coords_name, self.sc.img_ref_name, self.sc.img_shape, [], self.boxes_shm_name, self.box_hwnds_shm_name, self.box_info_shm_name )
@@ -1048,6 +1049,7 @@ class mmc_realtime:
 
         # Reset all detection/timing state.
         self.last_detection_found = 0
+        self.last_detection_delay_key = None
         self.hwnd_times = {}
         self.boxes_hwnd_index = {}
         self.boxes = np.ndarray( (50, 20000, 8), dtype=np.int64 )
@@ -1160,7 +1162,7 @@ class mmc_realtime:
                     if delay_key not in self.delay_key_print_history or self.delay_key_print_history[ delay_key ] != []:
                         self.delay_key_print_history[ delay_key ] = []
                         print( "calculating delay...." )
-                        delay = 3*1000000000
+                    delay = self.time_safety_ns * 2
 
             oldest_keep_img = time.perf_counter_ns() - delay
 
@@ -1221,10 +1223,14 @@ class mmc_realtime:
                     if num_boxes:
                         self.boxes[self.boxes_hwnd_index[hwnd]][new_first_index:new_last_index+1]=self.boxes_np[i][0:num_boxes]
                     self.hwnd_times[hwnd].append( [ detection_time, new_first_index, new_last_index ] )
-                    if self.last_detection_found > 0:
-                        detected_delay_key=(self.box_info_np[1],self.box_info_np[2])
-                        if detected_delay_key not in self.size_delays:
+                detected_delay_key = (self.box_info_np[1], self.box_info_np[2])
+                if self.last_detection_found > 0:
+                    if detected_delay_key not in self.size_delays:
+                        # Only record same-key intervals; cross-key gaps include warmup
+                        # time and would inflate the calibration estimate.
+                        if self.last_detection_delay_key == detected_delay_key:
                             self.size_detection_timings.setdefault(detected_delay_key,[]).append( detection_time - self.last_detection_found )
+                self.last_detection_delay_key = detected_delay_key
                 self.last_detection_found = detection_time
 
             self.profiler.mark( 'reshaped_boxes' )
