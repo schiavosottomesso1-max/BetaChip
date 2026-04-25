@@ -559,6 +559,7 @@ class mmc_detect_loop_class:
 
             if sstime > self.last_t:
                 detect_started_ns = time.perf_counter_ns()
+                _sizes = list(self.sizes)  # snapshot Manager proxy once per cycle to avoid repeated IPC calls
                 num_hwnds = self.img_ref[1]
                 self.profiler.mark( "got_hwnds" )
 
@@ -574,7 +575,7 @@ class mmc_detect_loop_class:
                         outs[ self.img_coords[i][4] ] = {}
 
                     self.profiler.mark( "presizes" )
-                    for size in self.sizes:
+                    for size in _sizes:
                         if self.env == 'tensorrt': # tensorrt needs to have engine files designed for batching
                             output = [ self.get_model_for_size(size).predict( x, imgsz=size, verbose=False, half=self.use_fp16 )[0] for x in batch ]
                         else:
@@ -603,7 +604,7 @@ class mmc_detect_loop_class:
                     self._write_box_info(
                         sstime=sstime,
                         num_hwnds=i,
-                        sizes_key=nn.sizes_to_key(self.sizes),
+                        sizes_key=nn.sizes_to_key(_sizes),
                         write_time_ns=write_time_ns,
                         inference_latency_ns=inference_latency_ns
                     )
@@ -614,7 +615,7 @@ class mmc_detect_loop_class:
                     self._write_box_info(
                         sstime=sstime,
                         num_hwnds=0,
-                        sizes_key=nn.sizes_to_key(self.sizes),
+                        sizes_key=nn.sizes_to_key(_sizes),
                         write_time_ns=write_time_ns,
                         inference_latency_ns=write_time_ns - detect_started_ns
                     )
@@ -1165,7 +1166,8 @@ class mmc_realtime:
 
             self.profiler.mark( 'appended_buffer' )
 
-            delay_key = ( len( self.hwnds ), nn.sizes_to_key( self.sizes ) )
+            _local_sizes = list(self.sizes)  # snapshot Manager proxy once per frame to avoid repeated IPC calls
+            delay_key = ( len( self.hwnds ), nn.sizes_to_key( _local_sizes ) )
             if delay_key[1] == 0:
                 # No nets active — the detector has no inference to run so the
                 # only pipeline overhead is IPC latency (~1 ms).  A small fixed
@@ -1198,23 +1200,20 @@ class mmc_realtime:
                     if delay_key not in self.delay_key_print_history or self.delay_key_print_history[ delay_key ] != []:
                         self.delay_key_print_history[ delay_key ] = []
                         print( "calculating delay...." )
-                    # Use time_safety_ns × 2 (300 ms by default) as the
-                    # cold-start fallback.  The straddle check requires
-                    # delay > inference_latency so that the latest detection's
-                    # snap timestamp is still newer than the display frame.
-                    # For fast nets (640, ~50 ms) 300 ms is amply conservative.
-                    # For slow nets (1280, ~200 ms) values below the inference
-                    # time cause a permanent gray screen; 300 ms keeps them
-                    # working until the calibration loop provides a real estimate.
-                    delay = self.time_safety_ns * 2
+                    # Use time_safety_ns × 2 as the cold-start minimum, but raise
+                    # the floor to (_infer_ns + time_safety_ns) once the first
+                    # inference completes.  For slow nets (1280/1920/2560) the
+                    # 300 ms default is shorter than the actual inference time,
+                    # causing the buffer to not hold a frame old enough for the
+                    # straddle check even after the first detection arrives.
+                    delay = max(self.time_safety_ns * 2,
+                                max(self.latest_inference_latency_ns, self.time_safety_ns) + self.time_safety_ns)
 
             oldest_keep_img = time.perf_counter_ns() - delay
 
-            # Retain the oldest frame that is still within the display window.
-            # Using img_buffer[0] (oldest) is intentional: it is the frame whose
-            # timestamp is straddled by available detections, allowing the renderer
-            # to reliably overlay censoring boxes. Trimming to the latest frame only
-            # would break that temporal alignment and produce a permanent gray screen.
+            # Retain the oldest frame needed for the straddle buffer window.
+            # The display frame is selected separately below (display_idx) so that
+            # a newer frame can be shown even when the buffer holds older frames.
             while( len( img_buffer ) > 1 and img_buffer[1][0] < oldest_keep_img ):
                 img_buffer.pop(0)
 
@@ -1223,17 +1222,24 @@ class mmc_realtime:
             # eliminate old detections
             if not img_buffer:
                 continue
-            # Use the oldest buffered frame (img_buffer[0]) as the display frame.
-            # The temporal detection condition requires detections that straddle this
-            # frame's timestamp.  img_buffer[-1] is used only for the live hwnd list
-            # and overlay-window positioning (new_xyxy).
-            to_show_time_ns = img_buffer[0][0]
-            # Widen the detection retention window to at least one full
-            # inference cycle.  For slow nets (1280, 1920, 2560) the default
-            # time_safety_ns (150 ms) may be shorter than the inference
-            # interval, causing the oldest stored detection to be trimmed
-            # before the straddle check can use it.
+            # Compute the detection-window width first so it can inform the display
+            # frame selection below.
             _infer_ns = max(self.latest_inference_latency_ns, self.time_safety_ns)
+            # Show the newest frame that is at least (_infer_ns + 20 ms) old.
+            # That margin guarantees there is a detection snap before the display
+            # frame (straddle condition #3) while keeping display latency — and
+            # therefore the SYNC readout — as low as possible.
+            # The buffer trim above still uses the full `delay` so straddle
+            # condition #4 stays satisfied even during slow or variable inference.
+            display_delay = min(max(_infer_ns + 20_000_000, 50_000_000), delay)
+            _target_time = time.perf_counter_ns() - display_delay
+            display_idx = 0
+            for _di in range(len(img_buffer)):
+                if img_buffer[_di][0] <= _target_time:
+                    display_idx = _di
+                else:
+                    break
+            to_show_time_ns = img_buffer[display_idx][0]
             oldest_detection = to_show_time_ns - _infer_ns
             latest_detection = to_show_time_ns + self.time_safety_ns
             for hwnd in self.hwnd_times:
@@ -1312,13 +1318,13 @@ class mmc_realtime:
                 # nets), the check failed and the screen went gray until the
                 # next detection arrived, producing periodic "waiting for frame"
                 # stutter every inference cycle on 1280/1920/2560 nets.
-                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0] - delay:
-                    old_xyxy = img_buffer[0][1][hwnd][1]
+                if hwnd in img_buffer[display_idx][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[display_idx][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[display_idx][0] - delay:
+                    old_xyxy = img_buffer[display_idx][1][hwnd][1]
                     self.profiler.mark( 'got_old_xyxy' )
                     min_h = min( old_xyxy[3] - old_xyxy[1], new_xyxy[3] - new_xyxy[1] )
                     min_w = min( old_xyxy[2] - old_xyxy[0], new_xyxy[2] - new_xyxy[0] )
 
-                    self.to_show[hwnd][0:min_h,0:min_w] = img_buffer[0][1][hwnd][0][0:min_h,0:min_w]
+                    self.to_show[hwnd][0:min_h,0:min_w] = img_buffer[display_idx][1][hwnd][0][0:min_h,0:min_w]
                     self.profiler.mark( 'populated_show' )
 
                     for i in range(len(self.hwnd_times[hwnd])):
