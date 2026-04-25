@@ -1209,14 +1209,6 @@ class mmc_realtime:
                     delay = max(self.time_safety_ns * 2,
                                 max(self.latest_inference_latency_ns, self.time_safety_ns) + self.time_safety_ns)
 
-            oldest_keep_img = time.perf_counter_ns() - delay
-
-            # Retain the oldest frame needed for the straddle buffer window.
-            # The display frame is selected separately below (display_idx) so that
-            # a newer frame can be shown even when the buffer holds older frames.
-            while( len( img_buffer ) > 1 and img_buffer[1][0] < oldest_keep_img ):
-                img_buffer.pop(0)
-
             self.profiler.mark( 'popped_old' )
 
             # eliminate old detections
@@ -1227,10 +1219,8 @@ class mmc_realtime:
             _infer_ns = max(self.latest_inference_latency_ns, self.time_safety_ns)
             # Show the newest frame that is at least (_infer_ns + 20 ms) old.
             # That margin guarantees there is a detection snap before the display
-            # frame (straddle condition #3) while keeping display latency — and
+            # frame (straddle condition) while keeping display latency — and
             # therefore the SYNC readout — as low as possible.
-            # The buffer trim above still uses the full `delay` so straddle
-            # condition #4 stays satisfied even during slow or variable inference.
             display_delay = min(max(_infer_ns + 20_000_000, 50_000_000), delay)
             _target_time = time.perf_counter_ns() - display_delay
             display_idx = 0
@@ -1239,6 +1229,22 @@ class mmc_realtime:
                     display_idx = _di
                 else:
                     break
+            # Trim stale frames from the front immediately after selecting the
+            # display frame.  Frames older than display_idx will never be shown
+            # again (because _target_time only advances).  The previous strategy
+            # trimmed by `delay` (up to 1.5 × inference_interval old), keeping
+            # up to ~90 frames × frame_size in memory for slow nets — this caused
+            # Python GC to collect hundreds of MB of numpy arrays periodically,
+            # producing the light freezes / stutters.  With this trim the buffer
+            # holds only the few frames between display_idx and the latest snap.
+            if display_idx > 0:
+                del img_buffer[:display_idx]
+                display_idx = 0
+            # Hard cap: never buffer more than _MAX_IMG_BUF frames regardless of
+            # timing, to bound worst-case memory use during cold-start or snap stalls.
+            _MAX_IMG_BUF = 120
+            if len(img_buffer) > _MAX_IMG_BUF:
+                del img_buffer[:len(img_buffer) - _MAX_IMG_BUF]
             to_show_time_ns = img_buffer[display_idx][0]
             oldest_detection = to_show_time_ns - _infer_ns
             latest_detection = to_show_time_ns + self.time_safety_ns
