@@ -1300,11 +1300,19 @@ class mmc_realtime:
 
                 # Straddle check: the oldest stored detection must be before
                 # the display frame (oldest < display) and the newest must be
-                # within one inference cycle AFTER or BEFORE the display frame.
-                # The _infer_ns slack prevents momentary gray frames when an
-                # inference cycle takes slightly longer than the calibrated
-                # average (common on 1280/1920/2560 nets).
-                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0] - _infer_ns:
+                # recent enough relative to the display frame.
+                #
+                # We use `delay` (not `_infer_ns`) as the freshness threshold.
+                # `delay` = 1.5 × avg_inference_interval, so the condition only
+                # fails when the newest detection is more than `delay` older than
+                # the display frame — i.e. when the detector has been silent for
+                # an entire display-window worth of time.  Using _infer_ns here
+                # was too tight: whenever a single inference cycle ran longer
+                # than `delay` (GPU load spike or just normal variance on slow
+                # nets), the check failed and the screen went gray until the
+                # next detection arrived, producing periodic "waiting for frame"
+                # stutter every inference cycle on 1280/1920/2560 nets.
+                if hwnd in img_buffer[0][1] and hwnd in self.hwnd_times and self.hwnd_times[hwnd][0][0] < img_buffer[0][0] and self.hwnd_times[hwnd][-1][0] > img_buffer[0][0] - delay:
                     old_xyxy = img_buffer[0][1][hwnd][1]
                     self.profiler.mark( 'got_old_xyxy' )
                     min_h = min( old_xyxy[3] - old_xyxy[1], new_xyxy[3] - new_xyxy[1] )
