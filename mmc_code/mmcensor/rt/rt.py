@@ -23,7 +23,6 @@ import statistics
 from datetime import datetime
 
 NS_PER_SECOND = 1_000_000_000
-VRAM_QUERY_CACHE_NS = NS_PER_SECOND
 MIN_FPS_INTERVAL_NS = 1_000_000
 FPS_EMA_ALPHA = 0.15
 
@@ -609,7 +608,7 @@ class mmc_detect_loop_class:
             if model is not None:
                 print( 'priming GPU engine: resolution %d (%d iterations)...' % (size, n_warmup) )
                 for _ in range( n_warmup ):
-                    model.predict(warmup_img, imgsz=size, verbose=False)
+                    model.predict(warmup_img, imgsz=size, verbose=False, half=self.use_fp16)
 
         # --- cuda-onnx: swap session with optimized CUDA EP session ----------
         # At this point the ultralytics predictor has been fully initialised
@@ -628,7 +627,7 @@ class mmc_detect_loop_class:
                         # Re-prime with the new session so its memory arenas are warmed up.
                         print( 'cuda-onnx: re-priming with optimized session at resolution %d...' % size )
                         for _ in range( n_warmup ):
-                            model.predict(warmup_img, imgsz=size, verbose=False)
+                            model.predict(warmup_img, imgsz=size, verbose=False, half=self.use_fp16)
                     else:
                         print( 'cuda-onnx: session replacement unsupported in this ultralytics version; '
                                'optimized CUDA EP options may not be active' )
@@ -866,8 +865,10 @@ class mmc_realtime:
         self.display_fps = 0.0
         self._last_display_tick_ns = 0
         self._cached_vram_text = 'VRAM: n/a'
-        self._last_vram_query_ns = 0
         self._vram_query_timeout_s = float(self.perf_settings.get('vram-query-timeout-s', 0.8))
+        self._vram_thread_stop = False
+        self._vram_query_thread = threading.Thread(target=self._vram_query_loop, daemon=True)
+        self._vram_query_thread.start()
         self._future_frame_warned = False
 
         self.sc = mmc_screencap()
@@ -1060,32 +1061,44 @@ class mmc_realtime:
         self._audio_tmp_path   = None
         self._audio_thread     = None
 
-    def _query_vram_usage( self ):
-        now_ns = time.perf_counter_ns()
-        if now_ns - self._last_vram_query_ns < VRAM_QUERY_CACHE_NS:
-            return self._cached_vram_text
-        self._last_vram_query_ns = now_ns
-        try:
-            result = subprocess.run(
-                [ 'nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits' ],
-                capture_output=True,
-                timeout=self._vram_query_timeout_s
-            )
-            if result.returncode != 0:
-                self._cached_vram_text = 'VRAM: n/a (nvidia-smi error)'
-                return self._cached_vram_text
-            lines = result.stdout.decode(errors='replace').strip().splitlines()
-            if not lines:
+    def _vram_query_loop( self ):
+        """Background daemon thread: poll nvidia-smi for VRAM usage every second.
+
+        Runs independently of the display thread so that nvidia-smi latency
+        (which can reach hundreds of milliseconds when the GPU is busy running
+        large networks) never blocks frame rendering.  The last successfully
+        retrieved value is stored in ``_cached_vram_text`` and read by
+        ``_query_vram_usage`` without any blocking.
+        """
+        while not self._vram_thread_stop:
+            try:
+                result = subprocess.run(
+                    [ 'nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits' ],
+                    capture_output=True,
+                    timeout=self._vram_query_timeout_s,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.decode(errors='replace').strip().splitlines()
+                    if lines:
+                        used_s, total_s = [x.strip() for x in lines[0].split(',')[:2]]
+                        used  = int(used_s)
+                        total = int(total_s)
+                        pct   = 100.0 * used / total if total else 0.0
+                        self._cached_vram_text = f'VRAM: {used}/{total} MB ({pct:.0f}%)'
+                    else:
+                        self._cached_vram_text = 'VRAM: n/a'
+                else:
+                    self._cached_vram_text = 'VRAM: n/a (nvidia-smi error)'
+            except Exception:
                 self._cached_vram_text = 'VRAM: n/a'
-                return self._cached_vram_text
-            first_line = lines[0]
-            used_s, total_s = [x.strip() for x in first_line.split(',')[:2]]
-            used = int(used_s)
-            total = int(total_s)
-            pct = 100.0 * used / total if total else 0.0
-            self._cached_vram_text = f'VRAM: {used}/{total} MB ({pct:.0f}%)'
-        except Exception:
-            self._cached_vram_text = 'VRAM: n/a (nvidia-smi unavailable)'
+            # Sleep in small increments so the stop flag is noticed promptly.
+            for _ in range(10):
+                if self._vram_thread_stop:
+                    break
+                time.sleep(0.1)
+
+    def _query_vram_usage( self ):
+        """Return the most recently polled VRAM usage string (non-blocking)."""
         return self._cached_vram_text
 
     def _draw_hud( self, img, frame_time_ns, waiting=False ):
@@ -1135,6 +1148,8 @@ class mmc_realtime:
 
     def shutdown( self ):
         self.running = False
+        # Signal the background VRAM polling thread to stop.
+        self._vram_thread_stop = True
         if getattr(self, '_hi_res_timer_active', False):
             _end_high_precision_timer()
             self._hi_res_timer_active = False
