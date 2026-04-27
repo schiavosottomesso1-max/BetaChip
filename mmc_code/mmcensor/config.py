@@ -69,8 +69,10 @@ def get_perf_settings():
             'gpu-mem-limit-bytes': 8 * 1024 * 1024 * 1024,
 
             # Number of dummy inference passes to run per resolution after model
-            # load.  10 passes pre-allocates all CUDA kernels / memory arenas so
-            # the first real frame does not cause a spike.
-            'warmup-iterations': 10,
+            # load.  20 passes pre-allocates all CUDA kernels / memory arenas
+            # and gives the GPU enough time to ramp from its idle P-state to
+            # boost clocks, so the first real frame does not cause a spike and
+            # performance is consistent across reboots.
+            'warmup-iterations': 20,
             }
     return perf_settings

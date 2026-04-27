@@ -208,6 +208,116 @@ def _replace_yolo_ort_session(model, new_session):
     return False
 
 
+def _check_windows_power_plan():
+    """Return (guid, name) of the active Windows power plan, or None on failure.
+
+    High Performance  = 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+    Ultimate Perf.    = e9a42b02-d5df-448d-aa00-03f14749eb61
+    Balanced          = 381b4222-f694-41f0-9685-ff5bb260df2e
+    Power Saver       = a1841308-3541-4fab-bc81-f71556f20b4a
+
+    Prints a startup warning when the plan is not High or Ultimate Performance.
+    Returns the (guid, name) tuple so callers can store it (e.g. for the HUD).
+    """
+    if os.name != 'nt':
+        return None
+    _HIGH_PERF_GUIDS = {
+        '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c': 'High Performance',
+        'e9a42b02-d5df-448d-aa00-03f14749eb61': 'Ultimate Performance',
+    }
+    try:
+        result = subprocess.run(
+            ['powercfg', '/getactivescheme'],
+            capture_output=True, timeout=5,
+        )
+        line = result.stdout.decode(errors='replace').strip()
+        # Output format: "Power Scheme GUID: <guid>  (<name>)"
+        import re
+        m = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s+\(([^)]+)\)', line, re.IGNORECASE)
+        if not m:
+            return None
+        guid = m.group(1).lower()
+        name = m.group(2).strip()
+        if guid not in _HIGH_PERF_GUIDS:
+            print(
+                'WARNING: Windows power plan is "%s". '
+                'For consistent performance, switch to High Performance or Ultimate Performance: '
+                'Settings → System → Power & Sleep → Additional power settings.' % name
+            )
+        else:
+            print('Power plan: %s (optimal).' % name)
+        return (guid, name)
+    except Exception:
+        return None
+
+
+def _check_gpu_boost_clocks(n_extra_warmup, models, warmup_img, use_fp16):
+    """Check whether the GPU has reached its advertised boost clock after warmup.
+
+    Queries ``nvidia-smi`` for the current graphics clock and the maximum
+    boost clock.  If the GPU is still below 90 % of its boost clock (common
+    when the system has just booted and the GPU P-state hasn't ramped up yet),
+    up to ``n_extra_warmup`` additional inference passes are run per model to
+    encourage the driver to move to P0, and then the clock is re-checked.
+
+    This is the main cause of run-to-run performance variability: on a cold
+    boot the GPU idles at a low P-state.  The standard warmup passes are
+    enough to allocate CUDA memory arenas but not always enough to raise the
+    clock all the way to boost.
+
+    Returns True when the GPU reached ≥ 90 % of boost (or when nvidia-smi is
+    unavailable), False when it could not ramp up within the extra passes.
+    """
+    def _read_clocks():
+        try:
+            r = subprocess.run(
+                ['nvidia-smi',
+                 '--query-gpu=clocks.current.graphics,clocks.max.graphics',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, timeout=3,
+            )
+            if r.returncode != 0:
+                return None, None
+            parts = r.stdout.decode(errors='replace').strip().split(',')
+            if len(parts) < 2:
+                return None, None
+            return int(parts[0].strip()), int(parts[1].strip())
+        except Exception:
+            return None, None
+
+    current, max_clock = _read_clocks()
+    if current is None or max_clock is None or max_clock == 0:
+        # nvidia-smi not available — nothing to do
+        return True
+
+    ratio = current / max_clock
+    if ratio >= 0.90:
+        print('GPU clocks: %d / %d MHz (%.0f%% of boost) — OK.' % (current, max_clock, ratio * 100))
+        return True
+
+    print(
+        'GPU clocks: %d / %d MHz (%.0f%% of boost) — running %d extra warmup passes to ramp up...'
+        % (current, max_clock, ratio * 100, n_extra_warmup)
+    )
+    for size, model in models.items():
+        for _ in range(n_extra_warmup):
+            model.predict(warmup_img, imgsz=size, verbose=False, half=use_fp16)
+
+    current, max_clock = _read_clocks()
+    if current is None or max_clock is None or max_clock == 0:
+        return True
+    ratio = current / max_clock
+    if ratio >= 0.90:
+        print('GPU clocks after extra warmup: %d / %d MHz (%.0f%%) — OK.' % (current, max_clock, ratio * 100))
+        return True
+    print(
+        'WARNING: GPU clocks still at %d / %d MHz (%.0f%%) after extra warmup. '
+        'Performance may be lower than normal until the GPU fully warms up.'
+        % (current, max_clock, ratio * 100)
+    )
+    return False
+
+
 # this is in a function because the weird backdoor
 # I do doesn't work inside a class
 # all of this is horrible and dxcam should just expose
@@ -475,11 +585,24 @@ class mmc_detect_loop_class:
             if model is not None:
                 self.models[size] = model
 
+        # For the PyTorch backend, disable cuDNN auto-tuning benchmarking.
+        # With benchmark=True (PyTorch default) cuDNN re-runs algorithm search
+        # on the first inference at each input shape, which adds a variable
+        # cold-start delay that differs between reboots depending on whether
+        # the cuDNN benchmark cache is warm.  With benchmark=False cuDNN uses
+        # its heuristic to pick an algorithm consistently every run.
+        if self.env not in ('tensorrt', 'openvino', 'directml', 'cuda-onnx'):
+            try:
+                import torch
+                torch.backends.cudnn.benchmark = False
+            except ImportError:
+                pass
+
         # --- GPU engine prime -----------------------------------------------
         # Run multiple dummy inferences per resolution so that CUDA allocates
         # all necessary kernels and memory arenas before the real-time loop
         # starts.  The first real frame would otherwise cause a large spike.
-        n_warmup = max(1, int(self.perf_settings.get('warmup-iterations', 10)))
+        n_warmup = max(1, int(self.perf_settings.get('warmup-iterations', 20)))
         warmup_img = np.full( ( 2560, 2560, 3 ), 127, dtype=np.uint8 )
         for size in self.models:
             model = self.get_model_for_size( size )
@@ -509,6 +632,15 @@ class mmc_detect_loop_class:
                     else:
                         print( 'cuda-onnx: session replacement unsupported in this ultralytics version; '
                                'optimized CUDA EP options may not be active' )
+        # --------------------------------------------------------------------
+
+        # --- GPU boost-clock check ------------------------------------------
+        # After all warmup passes, verify the GPU has reached its advertised
+        # boost clock.  On a cold boot the GPU idles at a low P-state; the
+        # standard warmup allocates memory arenas but may not be long enough to
+        # fully ramp up the clock.  If the GPU is still below 90% of boost,
+        # run up to n_warmup extra passes to encourage P0 and re-check.
+        _check_gpu_boost_clocks( n_warmup, self.models, warmup_img, self.use_fp16 )
         # --------------------------------------------------------------------
 
         self.img_shape = img_shape
@@ -719,6 +851,11 @@ class mmc_realtime:
                    'settings for lower latency on RTX 30-series GPUs.' )
         elif hags is True:
             print( 'HAGS: enabled.' )
+
+        # Check Windows power plan.  Balanced / Power Saver plans throttle CPU
+        # frequency and can reduce GPU boost clocks, causing variable performance
+        # between boots depending on which plan Windows restores at startup.
+        self._power_plan = _check_windows_power_plan()   # (guid, name) or None
 
         self.hud_enabled = bool(self.perf_settings.get('hud-enabled', True))
         self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 150))
@@ -973,6 +1110,12 @@ class mmc_realtime:
         sync_delay_ms = max(frame_age_ms, detector_delay_ms)
         warning = sync_delay_ms > self.sync_warning_ms
         status_text = f"SYNC: {'WARN' if warning else 'OK'} ({sync_delay_ms:.1f} ms)"
+        _HIGH_PERF_GUIDS = {
+            '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c',
+            'e9a42b02-d5df-448d-aa00-03f14749eb61',
+        }
+        _plan = getattr(self, '_power_plan', None)
+        _plan_warn = _plan is not None and _plan[0] not in _HIGH_PERF_GUIDS
         lines = [
             f'FPS: {self.display_fps:.1f}',
             f'Infer: {self.latest_inference_latency_ns / 1_000_000.0:.1f} ms',
@@ -981,11 +1124,14 @@ class mmc_realtime:
             'Timer: 1ms' if self._hi_res_timer_active else 'Timer: default',
             f'Resets: {self.reset_count}',
         ]
+        if _plan_warn:
+            lines.append(f'Power: {_plan[1]} !')
         color = (0, 0, 255) if warning else (0, 255, 0)
         for idx, text in enumerate(lines):
             y = 22 + idx * 24
+            line_color = (0, 0, 255) if (idx == 3 and warning) or (idx == len(lines) - 1 and _plan_warn) else (255, 255, 255)
             cv2.putText(img, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(img, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color if idx == 3 else (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(img, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, line_color, 1, cv2.LINE_AA)
 
     def shutdown( self ):
         self.running = False
