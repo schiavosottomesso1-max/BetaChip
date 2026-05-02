@@ -340,11 +340,6 @@ class mmc_screencap:
         self.populate_dxcams()
         self.visible_bounds = self.get_visible_bounds()
         self.img_shape = ( self.visible_bounds[3] - self.visible_bounds[1], self.visible_bounds[2] - self.visible_bounds[0], 3 )
-        # Maps target-window hwnd → overlay win32 hwnd.
-        # Used by show() to update the overlay's alpha (0 when waiting, 255 when
-        # censoring) so dxcam always sees the real source content through a
-        # transparent overlay instead of a gray placeholder.
-        self.overlay_hwnds_by_real_hwnd = {}
 
         # set up shared memory
         self.img_shm_name    = 'img_shm_name_%d'%random.randint(0,10000000)     # the actual image data
@@ -1262,7 +1257,6 @@ class mmc_realtime:
         self.running = True
         img_buffer = []
         self.hwnd_pos = {}
-        self.hwnd_last_waiting = {}
 
         n = 0
         t_fps = time.perf_counter()
@@ -1571,8 +1565,6 @@ class mmc_realtime:
                 cv2.destroyWindow( self.open_windows[window_hwnd] )
                 del self.open_windows[ window_hwnd ]
                 del self.hwnd_pos[ window_hwnd ]
-                self.sc.overlay_hwnds_by_real_hwnd.pop( window_hwnd, None )
-                self.hwnd_last_waiting.pop( window_hwnd, None )
 
             if self.gray_state == True and has_gray_img == False and self.off_gray_callback is not None:
                 self.off_gray_callback()
@@ -1638,6 +1630,7 @@ class mmc_realtime:
             if hwnd:
                 # Get window style and perform a 'bitwise or' operation to make the style layered and transparent, achieving
                 # the clickthrough property
+                ctypes.windll.user32.SetWindowDisplayAffinity( hwnd, 0x00000011 )
                 self.profiler.mark( 'show_affinity')
                 l_ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
                 self.profiler.mark( 'show_ex_style')
@@ -1669,23 +1662,4 @@ class mmc_realtime:
                 win32gui.SetWindowLong(hwnd, GWL_STYLE, currentStyle)
                 self.profiler.mark( 'show_setlonggwl')
                 self.hwnd_pos[ real_hwnd ] = new_xyxy
-                # Cache the overlay's win32 hwnd for the transparency updater below.
-                self.sc.overlay_hwnds_by_real_hwnd[real_hwnd] = hwnd
-
-        # Make the overlay fully transparent when waiting for the first valid
-        # detection frame.  Without this, the opaque gray overlay covers the
-        # source window and dxcam captures gray instead of the real content,
-        # so the detector never gets a usable image — a permanent feedback loop.
-        # When the straddle check passes (waiting=False) the overlay becomes
-        # opaque again and shows the censored content normally.
-        if real_hwnd not in self.hwnd_last_waiting or self.hwnd_last_waiting[real_hwnd] != waiting:
-            overlay_win32 = self.sc.overlay_hwnds_by_real_hwnd.get(real_hwnd)
-            if not overlay_win32:
-                overlay_win32 = win32gui.FindWindow(None, cv_title)
-                if overlay_win32:
-                    self.sc.overlay_hwnds_by_real_hwnd[real_hwnd] = overlay_win32
-            if overlay_win32:
-                alpha = 0 if waiting else 255
-                win32gui.SetLayeredWindowAttributes(overlay_win32, win32api.RGB(0, 0, 0), alpha, win32con.LWA_ALPHA)
-            self.hwnd_last_waiting[real_hwnd] = waiting
-
+                
