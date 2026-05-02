@@ -341,8 +341,9 @@ class mmc_screencap:
         self.visible_bounds = self.get_visible_bounds()
         self.img_shape = ( self.visible_bounds[3] - self.visible_bounds[1], self.visible_bounds[2] - self.visible_bounds[0], 3 )
         # Maps target-window hwnd → overlay win32 hwnd.
-        # When populated, snap_hwnds uses PrintWindow (bypasses overlapping windows)
-        # for those target windows so the detector always sees the raw source content.
+        # Used by show() to update the overlay's alpha (0 when waiting, 255 when
+        # censoring) so dxcam always sees the real source content through a
+        # transparent overlay instead of a gray placeholder.
         self.overlay_hwnds_by_real_hwnd = {}
 
         # set up shared memory
