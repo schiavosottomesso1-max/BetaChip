@@ -472,7 +472,7 @@ class mmc_screencap:
         if ok:
             raw    = bmp.GetBitmapBits(True)
             full_img = np.frombuffer(raw, dtype=np.uint8).reshape((full_h, full_w, 4))
-            # Crop to extended-frame bounds and convert BGRA → BGR.
+            # Crop to extended-frame bounds and convert BGRA → BGR (reverse channel order, drop alpha).
             result = np.ascontiguousarray(
                 full_img[inset_y:inset_y + ext_h, inset_x:inset_x + ext_w, 2::-1]
             )
