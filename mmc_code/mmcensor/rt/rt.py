@@ -426,68 +426,6 @@ class mmc_screencap:
 
             return visible_coords
 
-    def _printwindow_capture( self, hwnd ):
-        """Capture *hwnd*'s own content directly via PrintWindow, bypassing any
-        windows that overlap it on screen (e.g. the BetaChip censor overlay).
-
-        Returns ``(bgr_image, [left, top, right, bottom])`` where the rect is
-        the window's extended-frame bounds in screen coordinates, or ``None``
-        on any failure.
-        """
-        PW_RENDERFULLCONTENT = 0x02
-        DWMWA_EXTENDED_FRAME_BOUNDS = 9
-
-        # Full window rect (including drop-shadow) — needed for bitmap dimensions.
-        full_rect = ctypes.wintypes.RECT()
-        if not ctypes.windll.user32.GetWindowRect( ctypes.wintypes.HWND(hwnd), ctypes.byref(full_rect) ):
-            return None
-        full_w = full_rect.right  - full_rect.left
-        full_h = full_rect.bottom - full_rect.top
-        if full_w <= 0 or full_h <= 0:
-            return None
-
-        # Extended-frame bounds (excluding drop-shadow) — matches get_hwnd_coords.
-        ext_rect = ctypes.wintypes.RECT()
-        ctypes.windll.dwmapi.DwmGetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd),
-            ctypes.wintypes.DWORD(DWMWA_EXTENDED_FRAME_BOUNDS),
-            ctypes.byref(ext_rect),
-            ctypes.sizeof(ext_rect),
-        )
-        inset_x = ext_rect.left  - full_rect.left
-        inset_y = ext_rect.top   - full_rect.top
-        ext_w   = ext_rect.right  - ext_rect.left
-        ext_h   = ext_rect.bottom - ext_rect.top
-        if ext_w <= 0 or ext_h <= 0:
-            return None
-
-        # Render to an off-screen bitmap.
-        hwnd_dc = win32gui.GetWindowDC(hwnd)
-        mfc_dc  = win32ui.CreateDCFromHandle(hwnd_dc)
-        save_dc = mfc_dc.CreateCompatibleDC()
-        bmp     = win32ui.CreateBitmap()
-        bmp.CreateCompatibleBitmap(mfc_dc, full_w, full_h)
-        save_dc.SelectObject(bmp)
-        ok = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
-        if ok:
-            raw    = bmp.GetBitmapBits(True)
-            full_img = np.frombuffer(raw, dtype=np.uint8).reshape((full_h, full_w, 4))
-            # Crop to extended-frame bounds and convert BGRA → BGR (reverse channel order, drop alpha).
-            result = np.ascontiguousarray(
-                full_img[inset_y:inset_y + ext_h, inset_x:inset_x + ext_w, 2::-1]
-            )
-        else:
-            result = None
-
-        win32gui.DeleteObject(bmp.GetHandle())
-        save_dc.DeleteDC()
-        mfc_dc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwnd_dc)
-
-        if result is None:
-            return None
-        return result, [ext_rect.left, ext_rect.top, ext_rect.right, ext_rect.bottom]
-
     def snap_hwnds( self, hwnds ):
         tasks = []
 
@@ -529,39 +467,6 @@ class mmc_screencap:
                             cam_tasks[i][3]+cam['cam_coords'][1]-self.visible_bounds[1],
                             ]
                     self.img_shared[subimg_xyxy[1]:subimg_xyxy[3],subimg_xyxy[0]:subimg_xyxy[2]]=subimg
-
-        # For any target window that currently has a censor overlay on top of it,
-        # replace the dxcam region (which captured the overlay) with a direct
-        # PrintWindow capture of the source window.  PrintWindow reads from the
-        # window's own DWM render target, so overlapping windows never appear.
-        # This breaks the self-capture feedback loop that keeps the detector stuck
-        # in "Waiting for frame" when WDA_EXCLUDEFROMCAPTURE is not set.
-        if self.overlay_hwnds_by_real_hwnd:
-            for real_hwnd in list(self.overlay_hwnds_by_real_hwnd):
-                if real_hwnd not in hwnd_coords:
-                    continue
-                pw_result = self._printwindow_capture(real_hwnd)
-                if pw_result is None:
-                    continue
-                pw_img, pw_ext = pw_result   # pw_ext = [l, t, r, b] screen coords
-                vis = hwnd_coords[real_hwnd]  # visible intersection, same coordinate space
-                # Crop the PrintWindow image to the visible portion.
-                cx1 = max(0, vis[0] - pw_ext[0])
-                cy1 = max(0, vis[1] - pw_ext[1])
-                cw  = vis[2] - vis[0]
-                ch  = vis[3] - vis[1]
-                cw  = min(cw, pw_img.shape[1] - cx1)
-                ch  = min(ch, pw_img.shape[0] - cy1)
-                if cw <= 0 or ch <= 0:
-                    continue
-                pw_crop = pw_img[cy1:cy1 + ch, cx1:cx1 + cw]
-                # Write into img_shared at the correct offset.
-                dx = vis[0] - self.visible_bounds[0]
-                dy = vis[1] - self.visible_bounds[1]
-                fw = min(pw_crop.shape[1], self.img_shared.shape[1] - dx)
-                fh = min(pw_crop.shape[0], self.img_shared.shape[0] - dy)
-                if fw > 0 and fh > 0:
-                    self.img_shared[dy:dy + fh, dx:dx + fw] = pw_crop[:fh, :fw]
 
         i = 0
         for hwnd in hwnd_coords:
@@ -1356,6 +1261,7 @@ class mmc_realtime:
         self.running = True
         img_buffer = []
         self.hwnd_pos = {}
+        self.hwnd_last_waiting = {}
 
         n = 0
         t_fps = time.perf_counter()
@@ -1665,6 +1571,7 @@ class mmc_realtime:
                 del self.open_windows[ window_hwnd ]
                 del self.hwnd_pos[ window_hwnd ]
                 self.sc.overlay_hwnds_by_real_hwnd.pop( window_hwnd, None )
+                self.hwnd_last_waiting.pop( window_hwnd, None )
 
             if self.gray_state == True and has_gray_img == False and self.off_gray_callback is not None:
                 self.off_gray_callback()
@@ -1761,7 +1668,23 @@ class mmc_realtime:
                 win32gui.SetWindowLong(hwnd, GWL_STYLE, currentStyle)
                 self.profiler.mark( 'show_setlonggwl')
                 self.hwnd_pos[ real_hwnd ] = new_xyxy
-                # Register this overlay so snap_hwnds uses PrintWindow for the
-                # source window, keeping the detector feed free of the overlay.
+                # Cache the overlay's win32 hwnd for the transparency updater below.
                 self.sc.overlay_hwnds_by_real_hwnd[real_hwnd] = hwnd
-                
+
+        # Make the overlay fully transparent when waiting for the first valid
+        # detection frame.  Without this, the opaque gray overlay covers the
+        # source window and dxcam captures gray instead of the real content,
+        # so the detector never gets a usable image — a permanent feedback loop.
+        # When the straddle check passes (waiting=False) the overlay becomes
+        # opaque again and shows the censored content normally.
+        if real_hwnd not in self.hwnd_last_waiting or self.hwnd_last_waiting[real_hwnd] != waiting:
+            overlay_win32 = self.sc.overlay_hwnds_by_real_hwnd.get(real_hwnd)
+            if not overlay_win32:
+                overlay_win32 = win32gui.FindWindow(None, cv_title)
+                if overlay_win32:
+                    self.sc.overlay_hwnds_by_real_hwnd[real_hwnd] = overlay_win32
+            if overlay_win32:
+                alpha = 0 if waiting else 255
+                win32gui.SetLayeredWindowAttributes(overlay_win32, win32api.RGB(0, 0, 0), alpha, win32con.LWA_ALPHA)
+            self.hwnd_last_waiting[real_hwnd] = waiting
+
