@@ -917,6 +917,14 @@ class mmc_realtime:
         self.off_gray_callback = None
         self.gray_state = False
 
+        # When obs_mode is True a second cv2 window is shown alongside each
+        # overlay window.  Unlike the overlay, the recording window does NOT
+        # receive SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE), so OBS can
+        # capture it with "Window Capture".  It is a plain, repositionable
+        # window that the user can place on any monitor or screen region.
+        self.obs_mode = False
+        self.rec_open_windows = {}   # real_hwnd -> cv2 window title
+
         self.recording = False
         self.video_writers = {}      # hwnd -> cv2.VideoWriter
         self.video_writer_dims = {}  # hwnd -> (w, h); VideoWriter.get(CAP_PROP_FRAME_WIDTH/HEIGHT) returns 0, so stored separately
@@ -1566,6 +1574,19 @@ class mmc_realtime:
                 del self.open_windows[ window_hwnd ]
                 del self.hwnd_pos[ window_hwnd ]
 
+            # Close recording windows when obs_mode is turned off or the
+            # corresponding source window disappears.
+            rec_windows_to_close = []
+            for window_hwnd in self.rec_open_windows:
+                if not self.obs_mode or window_hwnd not in self.to_show or self.to_show[window_hwnd] is None:
+                    rec_windows_to_close.append( window_hwnd )
+            for window_hwnd in rec_windows_to_close:
+                try:
+                    cv2.destroyWindow( self.rec_open_windows[window_hwnd] )
+                except Exception:
+                    pass
+                del self.rec_open_windows[ window_hwnd ]
+
             if self.gray_state == True and has_gray_img == False and self.off_gray_callback is not None:
                 self.off_gray_callback()
                 self.gray_state = False
@@ -1622,7 +1643,17 @@ class mmc_realtime:
         self.open_windows[ real_hwnd ] = cv_title
         self._draw_hud( img, frame_time_ns, waiting=waiting )
         cv2.imshow( cv_title, img )
-        #cv2.imshow( 'rec', img )
+        # ── OBS recording window ─────────────────────────────────────────────
+        # When obs_mode is on, the same censored frame is shown in a second
+        # plain window that is NOT hidden from DXGI capture
+        # (no SetWindowDisplayAffinity applied).  The user points an OBS
+        # "Window Capture" source at this window to record/stream the
+        # censored output, while the invisible overlay continues to work
+        # normally for on-screen display.
+        if self.obs_mode:
+            rec_title = 'BetaChip_REC_%d' % real_hwnd
+            self.rec_open_windows[ real_hwnd ] = rec_title
+            cv2.imshow( rec_title, img )
         self.profiler.mark( 'show_call')
         if real_hwnd not in self.hwnd_pos or self.hwnd_pos[real_hwnd] != new_xyxy:
             hwnd = win32gui.FindWindow(None, cv_title )

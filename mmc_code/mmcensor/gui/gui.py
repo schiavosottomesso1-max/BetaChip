@@ -492,7 +492,7 @@ class mmc_gui:
 
     # ── Telemetry tab ──────────────────────────────────────────────────
     def _build_telemetry_tab( self ):
-        """Build the Telemetry tab: HUD toggle only."""
+        """Build the Telemetry tab: HUD toggle and OBS mode toggle."""
         outer = tk.Frame( self.tab_telemetry, bg=_BG )
         outer.grid( row=0, column=0, sticky="nsew", padx=16, pady=12 )
 
@@ -501,8 +501,19 @@ class mmc_gui:
               variable=self._hud_var, command=self._toggle_hud ).grid(
             row=0, column=0, sticky="w", padx=4 )
 
+        self._obs_var = tk.IntVar( value=int( self.rt.obs_mode ) )
+        _chk( outer,
+              text="OBS Mode — open a capturable 'BetaChip_REC_*' mirror window for each source\n"
+                   "(use OBS Window Capture → select 'BetaChip_REC_…' to record the censored output)",
+              variable=self._obs_var, command=self._toggle_obs_mode,
+              justify="left" ).grid(
+            row=1, column=0, sticky="w", padx=4, pady=(6, 0) )
+
     def _toggle_hud( self ):
         self.rt.hud_enabled = bool( self._hud_var.get() )
+
+    def _toggle_obs_mode( self ):
+        self.rt.obs_mode = bool( self._obs_var.get() )
 
     def on_close( self ):
         self.rt.shutdown()
