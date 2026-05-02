@@ -1630,7 +1630,6 @@ class mmc_realtime:
             if hwnd:
                 # Get window style and perform a 'bitwise or' operation to make the style layered and transparent, achieving
                 # the clickthrough property
-                ctypes.windll.user32.SetWindowDisplayAffinity( hwnd, 0x00000011 )
                 self.profiler.mark( 'show_affinity')
                 l_ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
                 self.profiler.mark( 'show_ex_style')
