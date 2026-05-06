@@ -1192,6 +1192,14 @@ class mmc_realtime:
         """
         print( 'Hot reset #%d: shutting down detector...' % (self.reset_count + 1,) )
 
+        # Capture the active sizes NOW, while the Manager is still alive.
+        # self.sizes is a Manager proxy list — after shutdown() the proxy
+        # becomes invalid and list(self.sizes) raises a connection error.
+        try:
+            current_sizes = list( self.sizes )
+        except Exception:
+            current_sizes = []
+
         # Gracefully stop the existing inference worker.
         try:
             self.detector_async.shutdown()
@@ -1223,9 +1231,6 @@ class mmc_realtime:
         # Re-apply CPU affinity for the capture/GUI process so the OS
         # does not migrate it to low-power efficiency cores during the pause.
         _set_process_affinity( self.perf_settings.get('capture-gui-affinity-cores', []) )
-
-        # Capture the active sizes before creating the new manager list.
-        current_sizes = list( self.sizes )
 
         # Respawn the inference worker, reusing the same shared-memory segments.
         print( 'Hot reset: respawning detector...' )
