@@ -131,8 +131,8 @@ class mmc_gui:
         self.tab_telemetry = ttk.Frame( tab_parent )
 
         tab_parent.add( self.tab_decorate,  text="Decorators" )
-        tab_parent.add( self.tab_realtime,  text="Telemetry" )
-        tab_parent.add( self.tab_telemetry, text="Realtime" )
+        tab_parent.add( self.tab_realtime,  text="Realtime" )
+        tab_parent.add( self.tab_telemetry, text="Telemetry" )
         tab_parent.grid( row=2, column=0, sticky="nsew", padx=4, pady=4 )
 
         # ── Responsive tab grids ────────────────────────────────────────

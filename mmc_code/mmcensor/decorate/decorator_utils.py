@@ -5,7 +5,7 @@ class feature_selector:
         for w in frame.winfo_children():
             w.destroy()
 
-        self.classes = sorted(classes)
+        self.classes = classes
         self.intvars = []
         for i in range(len(self.classes)):
             iv = tk.IntVar(value=self.classes[i] in selected_classes)
