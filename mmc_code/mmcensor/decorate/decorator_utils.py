@@ -5,10 +5,10 @@ class feature_selector:
         for w in frame.winfo_children():
             w.destroy()
 
-        self.classes = classes
+        self.classes = sorted(classes)
         self.intvars = []
-        for i in range(len(classes)):
-            iv = tk.IntVar(value=classes[i] in selected_classes)
+        for i in range(len(self.classes)):
+            iv = tk.IntVar(value=self.classes[i] in selected_classes)
             tk.Checkbutton( frame, text=self.classes[i],onvalue=1,offvalue=0,variable=iv).grid(row=i,column=0)
             self.intvars.append(iv)
 
