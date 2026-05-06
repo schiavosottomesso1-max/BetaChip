@@ -1494,7 +1494,7 @@ class mmc_realtime:
                             _rolling_p75 = float(np.percentile(list(_rbuf), 75))
                             _rolling_avg = sum(_rbuf) / len(_rbuf)
                             _cur_delay = self.size_delays[detected_delay_key]
-                            _new_delay = 1.2 * _rolling_p75 + 15_000_000
+                            _new_delay = 1.2 * _rolling_p75 + 15_000_000  # + 15 ms fixed jitter buffer
                             if _rolling_avg > 1.5 * _cur_delay:
                                 # Immediate update: rolling mean has grown >50 % above current delay.
                                 self.size_delays[detected_delay_key] = _new_delay
