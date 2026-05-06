@@ -27,8 +27,10 @@ NS_PER_SECOND = 1_000_000_000
 VRAM_QUERY_CACHE_NS = NS_PER_SECOND
 MIN_FPS_INTERVAL_NS = 1_000_000
 FPS_EMA_ALPHA = 0.15
-_N_ROLLING = 60          # rolling buffer size for post-calibration re-calibration
+_N_ROLLING = 120         # rolling buffer size for post-calibration re-calibration
 _ROLLING_RECAL_EVERY = 20  # recalibrate delay every N new rolling samples
+_AUTO_RESET_EMA_ALPHA = 0.12   # EMA smoothing for auto-reset SYNC check (absorbs single-frame GPU spikes)
+_HUD_SYNC_EMA_ALPHA   = 0.20   # EMA smoothing for SYNC value shown in the HUD (cosmetic only)
 
 def _disable_windows_quick_edit():
     # Only targets the console STD_INPUT_HANDLE (-10) to disable Quick-Edit
@@ -866,6 +868,8 @@ class mmc_realtime:
         self.latest_processing_delay_ns = 0
         self.latest_detection_write_ns = 0
         self.latest_detection_snap_ns = 0
+        self._ema_processing_delay_ns = 0.0   # smoothed delay used only for auto-reset logic
+        self._hud_sync_ema_ms = 0.0           # smoothed SYNC value shown in the HUD
         self.display_fps = 0.0
         self._last_display_tick_ns = 0
         self._cached_vram_text = 'VRAM: n/a'
@@ -1113,8 +1117,16 @@ class mmc_realtime:
         frame_age_ms = max(0.0, (now_ns - frame_time_ns) / 1_000_000.0)
         detector_delay_ms = max(0.0, self.latest_processing_delay_ns / 1_000_000.0)
         sync_delay_ms = max(frame_age_ms, detector_delay_ms)
+        # Smooth the displayed SYNC value with a light EMA so single-frame
+        # GPU spikes don't make the readout alarm unnecessarily.  The raw
+        # value is still used for all logic; this is cosmetic only.
+        if self._hud_sync_ema_ms == 0.0:
+            self._hud_sync_ema_ms = sync_delay_ms
+        else:
+            self._hud_sync_ema_ms = ((1.0 - _HUD_SYNC_EMA_ALPHA) * self._hud_sync_ema_ms
+                                     + _HUD_SYNC_EMA_ALPHA * sync_delay_ms)
         warning = sync_delay_ms > self.sync_warning_ms
-        status_text = f"SYNC: {'WARN' if warning else 'OK'} ({sync_delay_ms:.1f} ms)"
+        status_text = f"SYNC: {'WARN' if warning else 'OK'} ({self._hud_sync_ema_ms:.1f} ms)"
         _HIGH_PERF_GUIDS = {
             '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c',
             'e9a42b02-d5df-448d-aa00-03f14749eb61',
@@ -1225,6 +1237,8 @@ class mmc_realtime:
         self._rolling_timings = {}
         self._rolling_recal_counters = {}
         self._sync_warn_since_ns = None
+        self._ema_processing_delay_ns = 0.0
+        self._hud_sync_ema_ms = 0.0
         self._last_display_tick_ns = 0
         self._future_frame_warned = False
 
@@ -1375,11 +1389,13 @@ class mmc_realtime:
             # Compute the detection-window width first so it can inform the display
             # frame selection below.
             _infer_ns = max(self.latest_inference_latency_ns, self.time_safety_ns)
-            # Show the newest frame that is at least (_infer_ns + 20 ms) old.
+            # Show the newest frame that is at least (_infer_ns + 10 ms) old.
             # That margin guarantees there is a detection snap before the display
             # frame (straddle condition) while keeping display latency — and
             # therefore the SYNC readout — as low as possible.
-            display_delay = min(max(_infer_ns + 20_000_000, 50_000_000), delay)
+            # 10 ms (down from 20 ms) is still well above IPC round-trip latency
+            # on modern hardware and reduces steady-state frame_age_ms directly.
+            display_delay = min(max(_infer_ns + 10_000_000, 50_000_000), delay)
             _target_time = time.perf_counter_ns() - display_delay
             display_idx = 0
             for _di in range(len(img_buffer)):
@@ -1428,6 +1444,17 @@ class mmc_realtime:
                 self.latest_inference_latency_ns = int(self.box_info_np[4])
                 self.latest_processing_delay_ns = int(self.box_info_np[5])
                 self.latest_detection_snap_ns = int(self.box_info_np[6])
+                # Update the EMA used by the auto-reset guard.  We initialise
+                # to the raw value on the first sample to avoid a cold-start
+                # bias toward 0 triggering spurious resets during warm-up.
+                _raw_delay = float(self.latest_processing_delay_ns)
+                if self._ema_processing_delay_ns == 0.0:
+                    self._ema_processing_delay_ns = _raw_delay
+                else:
+                    self._ema_processing_delay_ns = (
+                        (1.0 - _AUTO_RESET_EMA_ALPHA) * self._ema_processing_delay_ns
+                        + _AUTO_RESET_EMA_ALPHA * _raw_delay
+                    )
                 for i in range(self.box_info_np[1]):
                     hwnd = self.box_hwnds_np[i][0]
                     num_boxes = self.box_hwnds_np[i][1]
@@ -1460,9 +1487,14 @@ class mmc_realtime:
                             self._rolling_timings[detected_delay_key].append(interval)
                             self._rolling_recal_counters[detected_delay_key] += 1
                             _rbuf = self._rolling_timings[detected_delay_key]
+                            # Use the 75th percentile of the rolling buffer instead of
+                            # mean × 1.5.  The percentile ignores the top-25 % of GPU
+                            # spikes while still covering the typical-slow case, so the
+                            # calibrated delay is tighter and SYNC stays lower.
+                            _rolling_p75 = float(np.percentile(list(_rbuf), 75))
                             _rolling_avg = sum(_rbuf) / len(_rbuf)
                             _cur_delay = self.size_delays[detected_delay_key]
-                            _new_delay = 1.5 * _rolling_avg + 20_000_000
+                            _new_delay = 1.2 * _rolling_p75 + 15_000_000
                             if _rolling_avg > 1.5 * _cur_delay:
                                 # Immediate update: rolling mean has grown >50 % above current delay.
                                 self.size_delays[detected_delay_key] = _new_delay
@@ -1604,7 +1636,11 @@ class mmc_realtime:
             if self.auto_reset_sync_s > 0 and self.hwnds:
                 _now_ns = time.perf_counter_ns()
                 _frame_age_ms = max(0.0, (_now_ns - to_show_time_ns) / 1_000_000.0)
-                _det_delay_ms = max(0.0, self.latest_processing_delay_ns / 1_000_000.0)
+                # Use the EMA-smoothed processing delay instead of the raw
+                # instantaneous value so that a single slow GPU inference cycle
+                # does not start the auto-reset countdown.  Only a sustained
+                # degradation (many consecutive slow frames) will trigger it.
+                _det_delay_ms = max(0.0, self._ema_processing_delay_ns / 1_000_000.0)
                 _is_warn = max(_frame_age_ms, _det_delay_ms) > self.sync_warning_ms
                 if _is_warn:
                     if self._sync_warn_since_ns is None:
