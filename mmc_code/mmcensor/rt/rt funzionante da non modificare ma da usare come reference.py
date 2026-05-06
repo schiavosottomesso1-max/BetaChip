@@ -3,7 +3,6 @@ import dxcam
 import ctypes
 import win32api, win32con, win32ui, win32gui
 import time
-from collections import deque
 import mmcensor.const as mmc_const
 import mmcensor.geo as geo
 import random
@@ -27,10 +26,6 @@ NS_PER_SECOND = 1_000_000_000
 VRAM_QUERY_CACHE_NS = NS_PER_SECOND
 MIN_FPS_INTERVAL_NS = 1_000_000
 FPS_EMA_ALPHA = 0.15
-_N_ROLLING = 120         # rolling buffer size for post-calibration re-calibration
-_ROLLING_RECAL_EVERY = 20  # recalibrate delay every N new rolling samples
-_AUTO_RESET_EMA_ALPHA = 0.12   # EMA smoothing for auto-reset SYNC check (absorbs single-frame GPU spikes)
-_HUD_SYNC_EMA_ALPHA   = 0.20   # EMA smoothing for SYNC value shown in the HUD (cosmetic only)
 
 def _disable_windows_quick_edit():
     # Only targets the console STD_INPUT_HANDLE (-10) to disable Quick-Edit
@@ -863,13 +858,11 @@ class mmc_realtime:
         self._power_plan = _check_windows_power_plan()   # (guid, name) or None
 
         self.hud_enabled = bool(self.perf_settings.get('hud-enabled', True))
-        self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 250))
+        self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 150))
         self.latest_inference_latency_ns = 0
         self.latest_processing_delay_ns = 0
         self.latest_detection_write_ns = 0
         self.latest_detection_snap_ns = 0
-        self._ema_processing_delay_ns = 0.0   # smoothed delay used only for auto-reset logic
-        self._hud_sync_ema_ms = 0.0           # smoothed SYNC value shown in the HUD
         self.display_fps = 0.0
         self._last_display_tick_ns = 0
         self._cached_vram_text = 'VRAM: n/a'
@@ -892,10 +885,8 @@ class mmc_realtime:
 
         self.size_detection_timings = {}
         self.size_delays = {}
-        self._rolling_timings = {}          # delay_key -> deque(maxlen=_N_ROLLING)
-        self._rolling_recal_counters = {}   # delay_key -> int (samples since last recal)
-        self.auto_reset_sync_s = float(self.perf_settings.get('auto-reset-sync-s', 30))
-        self._sync_warn_since_ns = None
+
+        # set up shared memory
         self.boxes_shm_name    = 'boxes_shm_name_%d'%random.randint(0,10000000)     # [ [ t, cls, x1, y1, x2, y2, prob, size ] ]
         self.box_hwnds_shm_name    = 'box_hwnds_shm_name_%d'%random.randint(0,10000000)     # [ [ hwnd, numboxes ] ]
         self.box_info_shm_name = 'box_info_shm_name_%d'%random.randint(0,10000000)  # [ t, numhwnds, t ]
@@ -1117,16 +1108,8 @@ class mmc_realtime:
         frame_age_ms = max(0.0, (now_ns - frame_time_ns) / 1_000_000.0)
         detector_delay_ms = max(0.0, self.latest_processing_delay_ns / 1_000_000.0)
         sync_delay_ms = max(frame_age_ms, detector_delay_ms)
-        # Smooth the displayed SYNC value with a light EMA so single-frame
-        # GPU spikes don't make the readout alarm unnecessarily.  The raw
-        # value is still used for all logic; this is cosmetic only.
-        if self._hud_sync_ema_ms == 0.0:
-            self._hud_sync_ema_ms = sync_delay_ms
-        else:
-            self._hud_sync_ema_ms = ((1.0 - _HUD_SYNC_EMA_ALPHA) * self._hud_sync_ema_ms
-                                     + _HUD_SYNC_EMA_ALPHA * sync_delay_ms)
         warning = sync_delay_ms > self.sync_warning_ms
-        status_text = f"SYNC: {'WARN' if warning else 'OK'} ({self._hud_sync_ema_ms:.1f} ms)"
+        status_text = f"SYNC: {'WARN' if warning else 'OK'} ({sync_delay_ms:.1f} ms)"
         _HIGH_PERF_GUIDS = {
             '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c',
             'e9a42b02-d5df-448d-aa00-03f14749eb61',
@@ -1204,14 +1187,6 @@ class mmc_realtime:
         """
         print( 'Hot reset #%d: shutting down detector...' % (self.reset_count + 1,) )
 
-        # Capture the active sizes NOW, while the Manager is still alive.
-        # self.sizes is a Manager proxy list — after shutdown() the proxy
-        # becomes invalid and list(self.sizes) raises a connection error.
-        try:
-            current_sizes = list( self.sizes )
-        except Exception:
-            current_sizes = []
-
         # Gracefully stop the existing inference worker.
         try:
             self.detector_async.shutdown()
@@ -1234,17 +1209,16 @@ class mmc_realtime:
         self.boxes = np.ndarray( (50, 20000, 8), dtype=np.int64 )
         self.size_detection_timings = {}
         self.size_delays = {}
-        self._rolling_timings = {}
-        self._rolling_recal_counters = {}
-        self._sync_warn_since_ns = None
-        self._ema_processing_delay_ns = 0.0
-        self._hud_sync_ema_ms = 0.0
+        self.display_fps = 0.0
         self._last_display_tick_ns = 0
         self._future_frame_warned = False
 
         # Re-apply CPU affinity for the capture/GUI process so the OS
         # does not migrate it to low-power efficiency cores during the pause.
         _set_process_affinity( self.perf_settings.get('capture-gui-affinity-cores', []) )
+
+        # Capture the active sizes before creating the new manager list.
+        current_sizes = list( self.sizes )
 
         # Respawn the inference worker, reusing the same shared-memory segments.
         print( 'Hot reset: respawning detector...' )
@@ -1389,13 +1363,11 @@ class mmc_realtime:
             # Compute the detection-window width first so it can inform the display
             # frame selection below.
             _infer_ns = max(self.latest_inference_latency_ns, self.time_safety_ns)
-            # Show the newest frame that is at least (_infer_ns + 10 ms) old.
+            # Show the newest frame that is at least (_infer_ns + 20 ms) old.
             # That margin guarantees there is a detection snap before the display
             # frame (straddle condition) while keeping display latency — and
             # therefore the SYNC readout — as low as possible.
-            # 10 ms (down from 20 ms) is still well above IPC round-trip latency
-            # on modern hardware and reduces steady-state frame_age_ms directly.
-            display_delay = min(max(_infer_ns + 10_000_000, 50_000_000), delay)
+            display_delay = min(max(_infer_ns + 20_000_000, 50_000_000), delay)
             _target_time = time.perf_counter_ns() - display_delay
             display_idx = 0
             for _di in range(len(img_buffer)):
@@ -1444,17 +1416,6 @@ class mmc_realtime:
                 self.latest_inference_latency_ns = int(self.box_info_np[4])
                 self.latest_processing_delay_ns = int(self.box_info_np[5])
                 self.latest_detection_snap_ns = int(self.box_info_np[6])
-                # Update the EMA used by the auto-reset guard.  We initialise
-                # to the raw value on the first sample to avoid a cold-start
-                # bias toward 0 triggering spurious resets during warm-up.
-                _raw_delay = float(self.latest_processing_delay_ns)
-                if self._ema_processing_delay_ns == 0.0:
-                    self._ema_processing_delay_ns = _raw_delay
-                else:
-                    self._ema_processing_delay_ns = (
-                        (1.0 - _AUTO_RESET_EMA_ALPHA) * self._ema_processing_delay_ns
-                        + _AUTO_RESET_EMA_ALPHA * _raw_delay
-                    )
                 for i in range(self.box_info_np[1]):
                     hwnd = self.box_hwnds_np[i][0]
                     num_boxes = self.box_hwnds_np[i][1]
@@ -1472,43 +1433,11 @@ class mmc_realtime:
                     self.hwnd_times[hwnd].append( [ detection_time, new_first_index, new_last_index ] )
                 detected_delay_key = (self.box_info_np[1], self.box_info_np[2])
                 if self.last_detection_found > 0:
-                    # Only record same-key intervals; cross-key gaps include warmup
-                    # time and would inflate the calibration estimate.
-                    if self.last_detection_delay_key == detected_delay_key:
-                        interval = detection_time - self.last_detection_found
-                        if detected_delay_key not in self.size_delays:
-                            # Pre-calibration: collect for initial calibration.
-                            self.size_detection_timings.setdefault(detected_delay_key, []).append(interval)
-                        else:
-                            # Post-calibration: rolling re-calibration (capped buffer).
-                            if detected_delay_key not in self._rolling_timings:
-                                self._rolling_timings[detected_delay_key] = deque(maxlen=_N_ROLLING)
-                                self._rolling_recal_counters[detected_delay_key] = 0
-                            self._rolling_timings[detected_delay_key].append(interval)
-                            self._rolling_recal_counters[detected_delay_key] += 1
-                            _rbuf = self._rolling_timings[detected_delay_key]
-                            # Use the 75th percentile of the rolling buffer instead of
-                            # mean × 1.5.  The percentile ignores the top-25 % of GPU
-                            # spikes while still covering the typical-slow case, so the
-                            # calibrated delay is tighter and SYNC stays lower.
-                            _rolling_p75 = float(np.percentile(list(_rbuf), 75))
-                            _rolling_avg = sum(_rbuf) / len(_rbuf)
-                            _cur_delay = self.size_delays[detected_delay_key]
-                            _new_delay = 1.2 * _rolling_p75 + 15_000_000  # + 15 ms fixed jitter buffer
-                            if _rolling_avg > 1.5 * _cur_delay:
-                                # Immediate update: rolling mean has grown >50 % above current delay.
-                                self.size_delays[detected_delay_key] = _new_delay
-                                self._rolling_recal_counters[detected_delay_key] = 0
-                                print('[rolling-recal] immediate update: delay %.3fs -> %.3fs (%s)' % (
-                                    _cur_delay / 1e9, _new_delay / 1e9,
-                                    datetime.now().strftime('%H:%M:%S')))
-                            elif self._rolling_recal_counters[detected_delay_key] >= _ROLLING_RECAL_EVERY:
-                                # Periodic update every _ROLLING_RECAL_EVERY samples.
-                                self.size_delays[detected_delay_key] = _new_delay
-                                self._rolling_recal_counters[detected_delay_key] = 0
-                                print('[rolling-recal] periodic update: delay %.3fs -> %.3fs (%s)' % (
-                                    _cur_delay / 1e9, _new_delay / 1e9,
-                                    datetime.now().strftime('%H:%M:%S')))
+                    if detected_delay_key not in self.size_delays:
+                        # Only record same-key intervals; cross-key gaps include warmup
+                        # time and would inflate the calibration estimate.
+                        if self.last_detection_delay_key == detected_delay_key:
+                            self.size_detection_timings.setdefault(detected_delay_key,[]).append( detection_time - self.last_detection_found )
                 self.last_detection_delay_key = detected_delay_key
                 self.last_detection_found = detection_time
 
@@ -1632,28 +1561,7 @@ class mmc_realtime:
 
             self.profiler.mark('closed_windows')
 
-            # --- Auto-reset on chronic SYNC WARN ---
-            if self.auto_reset_sync_s > 0 and self.hwnds:
-                _now_ns = time.perf_counter_ns()
-                _frame_age_ms = max(0.0, (_now_ns - to_show_time_ns) / 1_000_000.0)
-                # Use the EMA-smoothed processing delay instead of the raw
-                # instantaneous value so that a single slow GPU inference cycle
-                # does not start the auto-reset countdown.  Only a sustained
-                # degradation (many consecutive slow frames) will trigger it.
-                _det_delay_ms = max(0.0, self._ema_processing_delay_ns / 1_000_000.0)
-                _is_warn = max(_frame_age_ms, _det_delay_ms) > self.sync_warning_ms
-                if _is_warn:
-                    if self._sync_warn_since_ns is None:
-                        self._sync_warn_since_ns = _now_ns
-                    elif (_now_ns - self._sync_warn_since_ns) >= self.auto_reset_sync_s * NS_PER_SECOND:
-                        print('[auto-reset] chronic SYNC WARN for %.0fs — resetting runtime (%s)' % (
-                            self.auto_reset_sync_s, datetime.now().strftime('%H:%M:%S')))
-                        if t1.is_alive():
-                            t1.join(timeout=0.5)
-                        self.reset_runtime()
-                        self._sync_warn_since_ns = None
-                else:
-                    self._sync_warn_since_ns = None
+            n = n+1
             if n == 100:
                 elapsed = time.perf_counter() - t_fps
                 print( '100 frames in %.3fs, or %.1fps'%( elapsed, 100/elapsed ))

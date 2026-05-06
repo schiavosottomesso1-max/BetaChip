@@ -34,3 +34,45 @@ def get_time_settings():
             }
     return time_settings
 
+def get_perf_settings():
+    perf_settings = {
+            # Enable half precision where supported by the backend/device.
+            'use-fp16': True,
+            # Inference workers can be pinned to these CPU cores (empty disables pinning).
+            'inference-affinity-cores': [],
+            # Capture / GUI process can be pinned separately (empty disables pinning).
+            'capture-gui-affinity-cores': [],
+            # Overlay HUD controls.
+            'hud-enabled': True,
+            # Processing delay warning threshold in milliseconds.
+            'sync-warning-ms': 150,
+            # Timeout for one VRAM polling call via nvidia-smi.
+            'vram-query-timeout-s': 0.8,
+
+            # --- CUDA Execution Provider (onnxruntime) optimisation ---
+            # Used when mmcNNenv=cuda-onnx.  Irrelevant for PyTorch / TensorRT / OpenVINO paths.
+
+            # cuDNN convolution algorithm selection strategy.
+            # 'HEURISTIC' (fast startup, consistent) | 'EXHAUSTIVE' (slow, finds optimal) | 'DEFAULT'
+            'cudnn-conv-algo-search': 'HEURISTIC',
+
+            # Allow cuDNN to allocate the largest possible workspace so the fastest
+            # (most memory-intensive) kernels are available from the first frame.
+            'cudnn-conv-max-workspace': True,
+
+            # Memory arena growth strategy. 'kNextPowerOfTwo' avoids many small
+            # Windows VirtualAlloc calls that cause 100 ms+ jitter.
+            'arena-extend-strategy': 'kNextPowerOfTwo',
+
+            # Maximum GPU memory (bytes) the CUDA EP may allocate.
+            # 8 GB covers an RTX 3080; lower this for cards with less VRAM.
+            'gpu-mem-limit-bytes': 8 * 1024 * 1024 * 1024,
+
+            # Number of dummy inference passes to run per resolution after model
+            # load.  20 passes pre-allocates all CUDA kernels / memory arenas
+            # and gives the GPU enough time to ramp from its idle P-state to
+            # boost clocks, so the first real frame does not cause a spike and
+            # performance is consistent across reboots.
+            'warmup-iterations': 20,
+            }
+    return perf_settings

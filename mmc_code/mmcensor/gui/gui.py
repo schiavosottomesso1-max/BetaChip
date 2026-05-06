@@ -128,9 +128,11 @@ class mmc_gui:
         tab_parent = ttk.Notebook( self.root )
         self.tab_decorate = ttk.Frame( tab_parent )
         self.tab_realtime = ttk.Frame( tab_parent )
-        
-        tab_parent.add( self.tab_decorate, text="Decorators" )
-        tab_parent.add( self.tab_realtime, text="Realtime" )
+        self.tab_telemetry = ttk.Frame( tab_parent )
+
+        tab_parent.add( self.tab_decorate,  text="Decorators" )
+        tab_parent.add( self.tab_realtime,  text="Realtime" )
+        tab_parent.add( self.tab_telemetry, text="Telemetry" )
         tab_parent.grid( row=2, column=0, sticky="nsew", padx=4, pady=4 )
 
         # ── Responsive tab grids ────────────────────────────────────────
@@ -139,6 +141,7 @@ class mmc_gui:
         self.tab_decorate.columnconfigure( 0, weight=1 )
         self.tab_decorate.columnconfigure( 1, weight=1 )
         self.tab_decorate.rowconfigure( 1, weight=1 )
+        self.tab_telemetry.columnconfigure( 0, weight=1 )
 
         #############################
         ## make realtime tab
@@ -157,11 +160,13 @@ class mmc_gui:
         self.screenshot_button = _btn( rt_btn_bar, text="Screenshot",  command=self.screenshot_pushed, state="disabled" )
         self.record_button     = _btn( rt_btn_bar, text="Record",      command=self.record_pushed,    state="disabled" )
         self.stop_record_button= _btn( rt_btn_bar, text="Stop Rec",    command=self.stop_record_pushed, state="disabled" )
+        self.reset_button      = _btn( rt_btn_bar, text="Reset",       command=self.reset_pushed,     state="disabled" )
         self.get_hwnds_button  = _btn( rt_btn_bar, text="Refresh Window List", command=self.refresh_hwnds )
 
         for col, btn in enumerate( [self.ready_button, self.start_button,
                                      self.stop_button, self.screenshot_button,
                                      self.record_button, self.stop_record_button,
+                                     self.reset_button,
                                      self.get_hwnds_button] ):
             btn.grid( row=0, column=col, padx=4 )
 
@@ -249,6 +254,8 @@ class mmc_gui:
         self.decorator_config_frame = None
         self.decorator_being_configured = None
 
+        self._build_telemetry_tab()
+
         self.load_pushed()
         self.update_sizes()
 
@@ -270,10 +277,10 @@ class mmc_gui:
             font=("Arial", 46, "bold"), fill=_ACCENT, anchor="center" )
 
     def up( self ):
-        self.root.attributes( '-topmost', True )
+        self.root.after( 0, lambda: self.root.attributes( '-topmost', True ) )
 
     def down( self ):
-        self.root.attributes( '-topmost', False )
+        self.root.after( 0, lambda: self.root.attributes( '-topmost', False ) )
 
     def update_sizes( self ):
         sizes = []
@@ -398,7 +405,8 @@ class mmc_gui:
 
     def make_ready_async( self ):
         self.rt.make_ready()
-        self.start_button.config(state='normal')
+        self.root.after( 0, lambda: self.start_button.config(state='normal') )
+        self.root.after( 0, lambda: self.reset_button.config(state='normal') )
 
     def start_pushed( self ):
         self.start_button.config(state='disabled')
@@ -408,14 +416,22 @@ class mmc_gui:
         self.screenshot_button.config(state='normal')
         self.stop_button.config(state='normal')
         self.record_button.config(state='normal')
+        # Minimize the GUI window so the Tkinter compositor (DWM) does not
+        # compete with dxcam's DXGI Desktop Duplication pipeline.  When the
+        # GUI is in the foreground, DWM rendering load can delay DXGI frame
+        # acquisition by hundreds of milliseconds, inflating sync.
+        self.root.iconify()
 
     def start_async( self ):
         self.rt.go_decorate()
-        self.start_button.config(state='normal')
-        self.screenshot_button.config(state='disabled')
-        self.stop_button.config(state='disabled')
-        self.record_button.config(state='disabled')
-        self.stop_record_button.config(state='disabled')
+        def _on_stop():
+            self.start_button.config(state='normal')
+            self.screenshot_button.config(state='disabled')
+            self.stop_button.config(state='disabled')
+            self.record_button.config(state='disabled')
+            self.stop_record_button.config(state='disabled')
+            self.root.deiconify()  # restore GUI window after capture stops
+        self.root.after( 0, _on_stop )
 
     def screenshot_pushed( self ):
         self.rt.take_screenshot()
@@ -439,11 +455,20 @@ class mmc_gui:
 
     def _stop_record_async( self ):
         self.rt.stop_recording()          # blocks while audio thread joins + ffmpeg muxes
-        self.stop_record_button.config( state='disabled', text='Stop Rec', bg=_ACCENT )
-        self.record_button.config( state='normal' )
+        self.root.after( 0, lambda: self.stop_record_button.config( state='disabled', text='Stop Rec', bg=_ACCENT ) )
+        self.root.after( 0, lambda: self.record_button.config( state='normal' ) )
 
     def stop_pushed( self ):
         self.rt.running = False
+
+    def reset_pushed( self ):
+        self.reset_button.config(state='disabled', text='⏳ Resetting…')
+        t = threading.Thread( target=self._reset_async, daemon=True )
+        t.start()
+
+    def _reset_async( self ):
+        self.rt.reset_runtime()
+        self.root.after( 0, lambda: self.reset_button.config(state='normal', text='Reset') )
 
     def refresh_hwnds( self ):
         print( 'refresh triggered' )
@@ -465,8 +490,31 @@ class mmc_gui:
         for i in chosen:
             self.rt.hwnds.append( self.known_hwnds[i][0] )
 
-    def on_close( self ):
-        self.rt.detector_async.shutdown()
-        self.rt.running = False
-        sys.exit()
+    # ── Telemetry tab ──────────────────────────────────────────────────
+    def _build_telemetry_tab( self ):
+        """Build the Telemetry tab: HUD toggle and OBS mode toggle."""
+        outer = tk.Frame( self.tab_telemetry, bg=_BG )
+        outer.grid( row=0, column=0, sticky="nsew", padx=16, pady=12 )
 
+        self._hud_var = tk.IntVar( value=int( self.rt.hud_enabled ) )
+        _chk( outer, text="Show overlay HUD (on cv2 windows)",
+              variable=self._hud_var, command=self._toggle_hud ).grid(
+            row=0, column=0, sticky="w", padx=4 )
+
+        self._obs_var = tk.IntVar( value=int( self.rt.obs_mode ) )
+        _chk( outer,
+              text="OBS Mode — open a capturable 'BetaChip_REC_*' mirror window for each source\n"
+                   "(use OBS Window Capture → select 'BetaChip_REC_…' to record the censored output)",
+              variable=self._obs_var, command=self._toggle_obs_mode,
+              justify="left" ).grid(
+            row=1, column=0, sticky="w", padx=4, pady=(6, 0) )
+
+    def _toggle_hud( self ):
+        self.rt.hud_enabled = bool( self._hud_var.get() )
+
+    def _toggle_obs_mode( self ):
+        self.rt.obs_mode = bool( self._obs_var.get() )
+
+    def on_close( self ):
+        self.rt.shutdown()
+        sys.exit()
