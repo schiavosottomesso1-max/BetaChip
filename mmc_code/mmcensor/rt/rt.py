@@ -449,6 +449,8 @@ class mmc_realtime:
         self.off_gray_callback = None
         self.gray_state = False
 
+        self.show_overlay = True
+
         self.recording = False
         self.video_writers = {}      # hwnd -> cv2.VideoWriter
         self.video_writer_dims = {}  # hwnd -> (w, h); VideoWriter.get(CAP_PROP_FRAME_WIDTH/HEIGHT) returns 0, so stored separately
@@ -597,6 +599,20 @@ class mmc_realtime:
         while( len( self.sizes ) ):
             self.sizes.pop(0)
         self.sizes.extend( sizes )
+
+    def reset( self ):
+        """Stop any running decoration, shut down and recreate the detector process,
+        and reset the ready flag so make_ready() can be called again."""
+        self.running = False
+        self.detector_async.shutdown()
+        self.detector_async.initialize(
+            self.sc.img_shm_name, self.sc.img_coords_name, self.sc.img_ref_name,
+            self.sc.img_shape, [], self.boxes_shm_name, self.box_hwnds_shm_name,
+            self.box_info_shm_name )
+        self.sizes = self.detector_async.sizes
+        cv2.destroyAllWindows()
+        self.open_windows = {}
+        self.ready = False
 
     def make_ready( self ):
         self.time_safety_ns = mmc_config.get_time_settings()['time-safety'] * 1000 * 1000 * 1000
@@ -853,6 +869,8 @@ class mmc_realtime:
             self.profiler.mark( 'post_join' )
 
     def show( self, img, real_hwnd, new_xyxy ):
+        if not self.show_overlay:
+            return
         cv_title = self.cv_title_template%real_hwnd
         self.open_windows[ real_hwnd ] = cv_title
         cv2.imshow( cv_title, img )

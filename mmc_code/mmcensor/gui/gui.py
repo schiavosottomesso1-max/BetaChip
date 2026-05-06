@@ -128,27 +128,31 @@ class mmc_gui:
         tab_parent = ttk.Notebook( self.root )
         self.tab_decorate = ttk.Frame( tab_parent )
         self.tab_realtime = ttk.Frame( tab_parent )
+        self.tab_telemetry = ttk.Frame( tab_parent )
         
         tab_parent.add( self.tab_decorate, text="Decorators" )
         tab_parent.add( self.tab_realtime, text="Realtime" )
+        tab_parent.add( self.tab_telemetry, text="Telemetry" )
         tab_parent.grid( row=2, column=0, sticky="nsew", padx=4, pady=4 )
 
         # ── Responsive tab grids ────────────────────────────────────────
+        self.tab_telemetry.columnconfigure( 0, weight=1 )
+        self.tab_telemetry.rowconfigure( 1, weight=1 )
         self.tab_realtime.columnconfigure( 0, weight=1 )
-        self.tab_realtime.rowconfigure( 1, weight=1 )
+        self.tab_realtime.rowconfigure( 0, weight=1 )
         self.tab_decorate.columnconfigure( 0, weight=1 )
         self.tab_decorate.columnconfigure( 1, weight=1 )
         self.tab_decorate.rowconfigure( 1, weight=1 )
 
         #############################
-        ## make realtime tab
+        ## make telemetry tab
         #############################
         self.rt = mmc_realtime()
         self.rt.initialize()
         self.rt.on_gray_callback = self.up
         self.rt.off_gray_callback = self.down
 
-        rt_btn_bar = tk.Frame( self.tab_realtime, bg=_BG )
+        rt_btn_bar = tk.Frame( self.tab_telemetry, bg=_BG )
         rt_btn_bar.grid( row=0, column=0, sticky="ew", padx=2, pady=4 )
 
         self.ready_button      = _btn( rt_btn_bar, text="Make Ready",  command=self.make_ready_pushed )
@@ -157,12 +161,13 @@ class mmc_gui:
         self.screenshot_button = _btn( rt_btn_bar, text="Screenshot",  command=self.screenshot_pushed, state="disabled" )
         self.record_button     = _btn( rt_btn_bar, text="Record",      command=self.record_pushed,    state="disabled" )
         self.stop_record_button= _btn( rt_btn_bar, text="Stop Rec",    command=self.stop_record_pushed, state="disabled" )
+        self.reset_button      = _btn( rt_btn_bar, text="Reset",       command=self.reset_pushed )
         self.get_hwnds_button  = _btn( rt_btn_bar, text="Refresh Window List", command=self.refresh_hwnds )
 
         for col, btn in enumerate( [self.ready_button, self.start_button,
                                      self.stop_button, self.screenshot_button,
                                      self.record_button, self.stop_record_button,
-                                     self.get_hwnds_button] ):
+                                     self.reset_button, self.get_hwnds_button] ):
             btn.grid( row=0, column=col, padx=4 )
 
         # placeholder for realtime threads
@@ -172,7 +177,7 @@ class mmc_gui:
         self.known_hwnds = []
 
         # Listbox + scrollbar in a sub-frame
-        list_frame = tk.Frame( self.tab_realtime, bg=_BG )
+        list_frame = tk.Frame( self.tab_telemetry, bg=_BG )
         list_frame.grid( row=1, column=0, sticky="nsew", padx=2, pady=2 )
         list_frame.columnconfigure( 0, weight=1 )
         list_frame.rowconfigure( 0, weight=1 )
@@ -192,7 +197,7 @@ class mmc_gui:
         self.refresh_hwnds()
 
         self.size_checks = []
-        chk_frame = tk.Frame( self.tab_realtime, bg=_BG )
+        chk_frame = tk.Frame( self.tab_telemetry, bg=_BG )
         chk_frame.grid( row=2, column=0, sticky="w", padx=4, pady=2 )
         for i in range( len( mmc_const.supported_sizes ) ):
             iv = tk.IntVar( value=(i < 2) )
@@ -201,6 +206,16 @@ class mmc_gui:
                   onvalue=1, offvalue=0, variable=iv,
                   command=self.update_sizes ).grid( row=0, column=i, padx=4 )
             self.size_checks.append( iv )
+
+        #############################
+        ## make realtime tab
+        #############################
+        self.show_overlay_var = tk.IntVar( value=1 )
+        _chk( self.tab_realtime,
+              text="Show overlay HUD (on cv2 windows)",
+              onvalue=1, offvalue=0,
+              variable=self.show_overlay_var,
+              command=self.toggle_show_overlay ).grid( row=0, column=0, padx=8, pady=8, sticky="w" )
 
         ################################
         ## make decorator tab
@@ -444,6 +459,25 @@ class mmc_gui:
 
     def stop_pushed( self ):
         self.rt.running = False
+
+    def reset_pushed( self ):
+        self.ready_button.config( state='disabled' )
+        self.start_button.config( state='disabled' )
+        self.stop_button.config( state='disabled' )
+        self.screenshot_button.config( state='disabled' )
+        self.record_button.config( state='disabled' )
+        self.stop_record_button.config( state='disabled', text='Stop Rec', bg=_ACCENT )
+        self.reset_button.config( state='disabled' )
+        t = threading.Thread( target=self._reset_async, daemon=True )
+        t.start()
+
+    def _reset_async( self ):
+        self.rt.reset()
+        self.ready_button.config( state='normal' )
+        self.reset_button.config( state='normal' )
+
+    def toggle_show_overlay( self ):
+        self.rt.show_overlay = bool( self.show_overlay_var.get() )
 
     def refresh_hwnds( self ):
         print( 'refresh triggered' )
