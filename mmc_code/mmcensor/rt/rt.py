@@ -3,6 +3,7 @@ import dxcam
 import ctypes
 import win32api, win32con, win32ui, win32gui
 import time
+from collections import deque
 import mmcensor.const as mmc_const
 import mmcensor.geo as geo
 import random
@@ -858,7 +859,7 @@ class mmc_realtime:
         self._power_plan = _check_windows_power_plan()   # (guid, name) or None
 
         self.hud_enabled = bool(self.perf_settings.get('hud-enabled', True))
-        self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 150))
+        self.sync_warning_ms = float(self.perf_settings.get('sync-warning-ms', 250))
         self.latest_inference_latency_ns = 0
         self.latest_processing_delay_ns = 0
         self.latest_detection_write_ns = 0
