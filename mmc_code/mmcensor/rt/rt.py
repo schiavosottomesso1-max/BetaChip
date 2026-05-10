@@ -255,6 +255,63 @@ def _check_windows_power_plan():
     except Exception:
         return None
 
+def _query_total_vram_mb( timeout_s ):
+    try:
+        result = subprocess.run(
+            [ 'nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits' ],
+            capture_output=True,
+            timeout=timeout_s,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [ x.strip() for x in result.stdout.decode( errors='replace' ).splitlines() if x.strip() ]
+        if not lines:
+            return None
+        return int( lines[0] )
+    except Exception:
+        return None
+
+def _resolve_auto_model_profile( env, model_settings, perf_settings ):
+    if env in ( 'openvino', 'pytorch-cpu', 'directml' ):
+        return mmc_const.model_profile_small
+
+    thresholds = model_settings.get( 'auto-profile-vram-thresholds-gb', {} )
+    timeout_s = float( perf_settings.get( 'vram-query-timeout-s', 0.8 ) )
+    total_vram_mb = _query_total_vram_mb( timeout_s )
+    if total_vram_mb is not None:
+        if total_vram_mb >= int( thresholds.get( mmc_const.model_profile_large, 12 ) * 1024 ):
+            return mmc_const.model_profile_large
+        if total_vram_mb >= int( thresholds.get( mmc_const.model_profile_medium, 8 ) * 1024 ):
+            return mmc_const.model_profile_medium
+        return mmc_const.model_profile_small
+
+    return mmc_const.model_profile_medium
+
+def _iter_model_profiles( requested_profile ):
+    queue = [ mmc_const.normalize_model_profile( requested_profile ) ]
+    seen = set()
+    while queue:
+        profile = queue.pop( 0 )
+        if profile in seen or profile == mmc_const.model_profile_auto:
+            continue
+        seen.add( profile )
+        yield profile
+        queue.extend( mmc_const.model_profiles.get( profile, {} ).get( 'fallback_profiles', [] ) )
+
+def _get_model_asset_path( env, model_basename, size ):
+    if env == 'openvino':
+        return "../neuralnet_models/%s_openvino_model"%model_basename
+    if env in ( 'directml', 'cuda-onnx' ):
+        return "../neuralnet_models/%s.onnx"%model_basename
+    if env == 'tensorrt':
+        return "../neuralnet_models/%s-%d.engine"%(model_basename,size)
+    return "../neuralnet_models/%s.pt"%model_basename
+
+def _model_asset_exists( env, model_path ):
+    if env == 'openvino':
+        return os.path.isdir( model_path )
+    return os.path.isfile( model_path )
+
 
 def _check_gpu_boost_clocks(n_extra_warmup, models, warmup_img, use_fp16):
     """Check whether the GPU has reached its advertised boost clock after warmup.
@@ -539,7 +596,14 @@ class mmc_detect_loop_class:
         self.sizes = sizes
         self.state = state
         self.env = os.getenv( 'mmcNNenv' )
+        self.model_settings = mmc_config.get_model_settings()
         self.perf_settings = mmc_config.get_perf_settings()
+        requested_profile = os.getenv( 'mmcModelProfile', self.model_settings.get( 'default-profile', mmc_const.model_profile_medium ) )
+        self.requested_model_profile = mmc_const.normalize_model_profile( requested_profile, mmc_const.model_profile_medium )
+        self.active_model_profile = self.requested_model_profile
+        if self.active_model_profile == mmc_const.model_profile_auto:
+            self.active_model_profile = _resolve_auto_model_profile( self.env, self.model_settings, self.perf_settings )
+        self.known_classes = mmc_const.get_detection_classes()
         self.use_fp16 = bool(self.perf_settings.get('use-fp16', True))
         _set_process_affinity(self.perf_settings.get('inference-affinity-cores', []))
         if not _set_high_priority_class():
@@ -550,45 +614,25 @@ class mmc_detect_loop_class:
 
         # Track ONNX paths for 'cuda-onnx' env so we can swap the session after warmup.
         self._cuda_onnx_paths = {}
+        self.model_class_indices = {}
 
         self.models = {}
+        print( 'model profile requested: %s | active: %s'%( self.requested_model_profile, self.active_model_profile ) )
         for size in mmc_const.supported_sizes:
-            if self.env == 'openvino':
-                model = YOLO( "../neuralnet_models/640m_openvino_model", task='detect' )
-            elif self.env == 'directml':
-                onnx_path = "../neuralnet_models/640m.onnx"
-                model = YOLO( onnx_path, task='detect' )
-            elif self.env == 'cuda-onnx':
-                # Load via ultralytics so we reuse its preprocessing and postprocessing.
-                # After warmup below, the internal onnxruntime session will be replaced
-                # with one that uses the optimized CUDA EP provider options.
-                onnx_path = "../neuralnet_models/640m.onnx"
-                if os.path.isfile( onnx_path ):
-                    model = YOLO( onnx_path, task='detect' )
-                    self._cuda_onnx_paths[size] = onnx_path
-                else:
-                    model = None
-            elif self.env == 'tensorrt':
-                engine_path = "../neuralnet_models/640m-%d.engine"%size
-                if os.path.isfile( engine_path ):
-                    model = YOLO( engine_path, task='detect' )
-                else:
-                    model = None
-            # tested this on 20240813
-            # was 50% slower than just using the generic 640m.pt on my 4090,
-            # even when exporting with half=True and simplify=True
-            # also used 10GB of VRAM.  -not worth-.
-            #elif self.env == 'pytorch-cuda':
-                #onnx_path = "../neuralnet_models/640m-%d.onnx"%size
-                #if os.path.isfile( onnx_path ):
-                    #model = YOLO( onnx_path )
-                #else:
-                    #model = None
-            else:
-                model = YOLO( "../neuralnet_models/640m.pt", task='detect' )
+            model, loaded_profile, model_path = self._load_model_for_size( YOLO, size )
 
             if model is not None:
                 self.models[size] = model
+                self.model_class_indices[size] = mmc_const.get_detection_class_index_map(
+                    getattr( model, 'names', {} ),
+                    self.known_classes
+                )
+                if self.env == 'cuda-onnx':
+                    self._cuda_onnx_paths[size] = model_path
+                if loaded_profile != self.active_model_profile:
+                    print( 'size %d: using %s fallback asset %s'%( size, loaded_profile, model_path ) )
+                else:
+                    print( 'size %d: using %s asset %s'%( size, loaded_profile, model_path ) )
 
         # For the PyTorch backend, disable cuDNN auto-tuning benchmarking.
         # With benchmark=True (PyTorch default) cuDNN re-runs algorithm search
@@ -602,6 +646,9 @@ class mmc_detect_loop_class:
                 torch.backends.cudnn.benchmark = False
             except ImportError:
                 pass
+
+        if not len( self.models ):
+            print( 'WARNING: no model assets were found for profile %s.'%self.active_model_profile )
 
         # --- GPU engine prime -----------------------------------------------
         # Run multiple dummy inferences per resolution so that CUDA allocates
@@ -669,7 +716,19 @@ class mmc_detect_loop_class:
         self.state[0] = 1
 
     def get_model_for_size( self, size ):
-        return self.models[ size ]
+        return self.models.get( size )
+
+    def _load_model_for_size( self, YOLO, size ):
+        for profile in _iter_model_profiles( self.active_model_profile ):
+            basename = mmc_const.model_profiles[ profile ][ 'basename' ]
+            model_path = _get_model_asset_path( self.env, basename, size )
+            if not _model_asset_exists( self.env, model_path ):
+                continue
+            try:
+                return YOLO( model_path, task='detect' ), profile, model_path
+            except Exception as exc:
+                print( 'could not load %s for size %d: %s'%( model_path, size, exc ) )
+        return None, None, None
 
     def _write_box_info(self, sstime, num_hwnds, sizes_key, write_time_ns, inference_latency_ns):
         self.box_info_np[0] = sstime
@@ -713,10 +772,13 @@ class mmc_detect_loop_class:
 
                     self.profiler.mark( "presizes" )
                     for size in _sizes:
+                        model_for_size = self.get_model_for_size( size )
+                        if model_for_size is None:
+                            continue
                         if self.env == 'tensorrt': # tensorrt needs to have engine files designed for batching
-                            output = [ self.get_model_for_size(size).predict( x, imgsz=size, verbose=False, half=self.use_fp16 )[0] for x in batch ]
+                            output = [ model_for_size.predict( x, imgsz=size, verbose=False, half=self.use_fp16 )[0] for x in batch ]
                         else:
-                            output = self.get_model_for_size(size).predict( batch, imgsz=size, verbose=False, half=self.use_fp16 )
+                            output = model_for_size.predict( batch, imgsz=size, verbose=False, half=self.use_fp16 )
                         #if random.randint(0,100) <2:
                             #raise Exception( "test throw" )
                         self.profiler.mark( "predict" )
@@ -732,7 +794,10 @@ class mmc_detect_loop_class:
                         j=0
                         for size in outs[hwnd]:
                             for box in outs[hwnd][size]:
-                                self.boxes_np[i][j] = (sstime,box.cls[0].item(),box.xyxy[0][0].item(),box.xyxy[0][1].item(),box.xyxy[0][2].item(),box.xyxy[0][3].item(),1,size)
+                                mapped_class_index = self.model_class_indices.get( size, {} ).get( int( box.cls[0].item() ) )
+                                if mapped_class_index is None:
+                                    continue
+                                self.boxes_np[i][j] = (sstime,mapped_class_index,box.xyxy[0][0].item(),box.xyxy[0][1].item(),box.xyxy[0][2].item(),box.xyxy[0][3].item(),1,size)
                                 j = j+1
                         self.profiler.mark( "copied_box" )
                         self.box_hwnds_np[i]=(hwnd,j,self.img_coords[i][2]-self.img_coords[i][0],self.img_coords[i][3]-self.img_coords[i][1])
@@ -841,6 +906,12 @@ class mmc_realtime:
 
     def initialize( self ):
         _disable_windows_quick_edit()
+        self.model_settings = mmc_config.get_model_settings()
+        self.model_profile = mmc_const.normalize_model_profile(
+            os.getenv( 'mmcModelProfile', self.model_settings.get( 'default-profile', mmc_const.model_profile_medium ) ),
+            mmc_const.model_profile_medium
+        )
+        os.environ['mmcModelProfile'] = self.model_profile
         self.perf_settings = mmc_config.get_perf_settings()
         _set_process_affinity(self.perf_settings.get('capture-gui-affinity-cores', []))
         self._hi_res_timer_active = _begin_high_precision_timer()
@@ -1184,6 +1255,10 @@ class mmc_realtime:
         while( len( self.sizes ) ):
             self.sizes.pop(0)
         self.sizes.extend( sizes )
+
+    def set_model_profile( self, profile ):
+        self.model_profile = mmc_const.normalize_model_profile( profile, self.model_profile )
+        os.environ['mmcModelProfile'] = self.model_profile
 
     def make_ready( self ):
         self.time_safety_ns = mmc_config.get_time_settings()['time-safety'] * 1000 * 1000 * 1000

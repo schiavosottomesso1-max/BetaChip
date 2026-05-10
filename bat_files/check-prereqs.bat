@@ -19,6 +19,7 @@ if not exist .\neuralnet_models\640m.pt (
 	echo #                                                                                 #
 	echo # Download the 640m.pt file, which should be approximately                        #
 	echo # 50MB, and save it in the /neuralnet_models/ folder                              #
+	echo # Optional: if you want the "small" profile too, add 320n.pt or 320n.onnx later. #
 	echo #                                                                                 #
 	echo # THIS PROGRAM WILL NOT WORK UNTIL YOU DO THIS.                                   #
 	echo #                                                                                 #
@@ -41,4 +42,3 @@ if not exist .\tools\ffmpeg.exe (
 	echo ffmpeg.exe downloaded to tools\ffmpeg.exe
 	echo.
 )
-

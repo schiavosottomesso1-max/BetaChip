@@ -8,6 +8,11 @@ and look for the "pytorch link" for the "640m" model.
 The file should be called 640m.pt and be approximately 50MB.  Put the file in the
 "neuralnet_models" folder.
 
+Optional: if you also want the new "small" profile, add the 320n model from the same
+NudeNet family (for example 320n.pt or 320n.onnx, depending on your backend).  BetaChip
+keeps all legacy class names and maps the official NudeNet labels back to those old
+class names, so adding the small profile does not remove any old class.
+
 1. Double-click on setup.bat.  This will describe the five different neural net engines
 that MMCensor can install for you.  1 is the fastest, and 5 is the slowest.  You should
 select the fastest that is compatible with your hardware.  If for some reason it doesn't
@@ -40,6 +45,12 @@ ready, the "Start" button will be available.  You can choose which monitors or w
 you want to censor in the window (use the scroll wheel to scroll up or down).  You can 
 select multiple windows, but selecting multiple windows has a SIGNIFICANT performance hit.
 It is usually better to select a whole monitor rather than two windows on the monitor.
+You can also choose a model profile in the Realtime tab:
+* auto = choose based on backend / available VRAM
+* small = 320n for weaker systems
+* medium = 640m default balance
+* large = 640m with more aggressive sizing for stronger GPUs
+If you change the profile after warming up the net, press Reset so the new profile is loaded.
 Use Start to start the censoring and Stop to stop it.  If you click Screenshot, it will
 save a screenshot in the Screenshots/ folder in the MMC folder.  Refresh Window List 
 refreshes the window list if you open new windows or close old ones.  FPS numbers will

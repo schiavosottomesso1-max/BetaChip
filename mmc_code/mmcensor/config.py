@@ -1,3 +1,5 @@
+import mmcensor.const as mmc_const
+
 # here you can define how large
 # the images run through the net
 # will be.
@@ -12,11 +14,30 @@
 # in large censor areas (like thumbnails,
 # or smaller images in a full-screen capture).
 def get_net_sizes():
-    net_sizes = [ 1280, 640, 2560 ]
+    model_settings = get_model_settings()
+    default_profile = model_settings['default-profile']
+    if default_profile == mmc_const.model_profile_auto:
+        default_profile = mmc_const.model_profile_medium
+    net_sizes = list( model_settings['profile-net-sizes'][ default_profile ] )
     #net_sizes = [ 1280 ]
     #net_sizes = [ 1280, 640 ]
     #net_sizes = [ 640 ]
     return( net_sizes )
+
+def get_model_settings():
+    model_settings = {
+            'default-profile': mmc_const.model_profile_auto,
+            'profile-net-sizes': {
+                mmc_const.model_profile_small:  [ 640 ],
+                mmc_const.model_profile_medium: [ 1280, 640 ],
+                mmc_const.model_profile_large:  [ 1280, 640, 2560 ],
+            },
+            'auto-profile-vram-thresholds-gb': {
+                mmc_const.model_profile_medium: 8,
+                mmc_const.model_profile_large: 12,
+            },
+            }
+    return model_settings
 
 # time-safety is how long detected features are censored.
 # for example, if MMCensor detects a face at 01:25.39 in a 

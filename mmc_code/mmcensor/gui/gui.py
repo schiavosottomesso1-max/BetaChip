@@ -5,6 +5,7 @@ import os
 import sys
 import importlib
 import mmcensor.const as mmc_const
+import mmcensor.config as mmc_config
 from functools import partial
 import threading
 import json
@@ -197,15 +198,35 @@ class mmc_gui:
         self.refresh_hwnds()
 
         self.size_checks = []
+        default_sizes = set( mmc_config.get_net_sizes() )
         chk_frame = tk.Frame( self.tab_realtime, bg=_BG )
         chk_frame.grid( row=2, column=0, sticky="w", padx=4, pady=2 )
         for i in range( len( mmc_const.supported_sizes ) ):
-            iv = tk.IntVar( value=(i < 2) )
+            iv = tk.IntVar( value=(mmc_const.supported_sizes[i] in default_sizes) )
             _chk( chk_frame,
                   text=f"net size {mmc_const.supported_sizes[i]}",
                   onvalue=1, offvalue=0, variable=iv,
                   command=self.update_sizes ).grid( row=0, column=i, padx=4 )
             self.size_checks.append( iv )
+
+        model_frame = tk.Frame( self.tab_realtime, bg=_BG )
+        model_frame.grid( row=3, column=0, sticky="w", padx=4, pady=(0, 4) )
+        _lbl( model_frame, text="Model profile:" ).grid( row=0, column=0, padx=(0, 6) )
+        self.model_profile_var = tk.StringVar( value=self.rt.model_profile )
+        self.model_profile_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.model_profile_var,
+            values=mmc_const.supported_model_profiles,
+            state="readonly",
+            width=10,
+            style="Pink.TCombobox",
+        )
+        self.model_profile_combo.grid( row=0, column=1, padx=(0, 8) )
+        self.model_profile_combo.bind( "<<ComboboxSelected>>", self.update_model_profile )
+        _lbl(
+            model_frame,
+            text="auto=VRAM/backend, small=320n, medium=640m, large=640m quality",
+        ).grid( row=0, column=2, sticky="w" )
 
         ################################
         ## make decorator tab
@@ -290,6 +311,17 @@ class mmc_gui:
 
         self.rt.update_sizes(sizes)
 
+    def update_model_profile( self, evt=None ):
+        profile = self.model_profile_var.get()
+        self.rt.set_model_profile( profile )
+        if profile == mmc_const.model_profile_auto:
+            profile = mmc_const.model_profile_medium
+        profile_sizes = self.rt.model_settings.get( 'profile-net-sizes', {} ).get( profile )
+        if profile_sizes is not None:
+            for i in range( len( mmc_const.supported_sizes ) ):
+                self.size_checks[i].set( int( mmc_const.supported_sizes[i] in profile_sizes ) )
+            self.update_sizes()
+
     def get_known_decorators( self ):
         paths = [ f.name for f in os.scandir('mmcensor/decorate') if f.is_dir() ]
         if '__pycache__' in paths:
@@ -302,7 +334,7 @@ class mmc_gui:
 
     def add_decorator( self, decorator_type ):
         decorator = importlib.import_module( 'mmcensor.decorate.%s'%decorator_type ).decorator()
-        decorator.initialize( mmc_const.nudenet_v3_classes )
+        decorator.initialize( mmc_const.get_detection_classes() )
         self.rt.decorators.append( decorator )
         self.decorator_types.append( decorator_type )
         self.redraw_decorators()
