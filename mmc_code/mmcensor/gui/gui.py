@@ -225,7 +225,7 @@ class mmc_gui:
         self.model_profile_combo.bind( "<<ComboboxSelected>>", self.update_model_profile )
         _lbl(
             model_frame,
-            text="auto=VRAM/backend, small=320n, medium=640m, large=640m quality",
+            text="auto=VRAM/backend, small=320n, medium=640m, large=640m (quality)",
         ).grid( row=0, column=2, sticky="w" )
 
         ################################

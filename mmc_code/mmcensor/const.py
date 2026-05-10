@@ -24,7 +24,8 @@ legacy_nudenet_v3_classes = [
         'BUTTOCKS_COVERED',
     ]
 
-nudenet_v3_classes = list( legacy_nudenet_v3_classes )
+# Keep the historic name for older code paths that still import it directly.
+nudenet_v3_classes = legacy_nudenet_v3_classes
 
 model_profile_auto   = 'auto'
 model_profile_small  = 'small'
@@ -99,6 +100,8 @@ model_profiles = {
         },
         model_profile_large: {
             'label': 'Large',
+            # NudeNet does not currently ship a larger official PyTorch weight than 640m,
+            # so the large profile reuses 640m and relies on more aggressive sizing.
             'basename': '640m',
             'description': 'Highest-quality preset; uses the 640m family with more aggressive sizing.',
             'fallback_profiles': [ model_profile_medium, model_profile_small ],

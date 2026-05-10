@@ -796,6 +796,8 @@ class mmc_detect_loop_class:
                             for box in outs[hwnd][size]:
                                 mapped_class_index = self.model_class_indices.get( size, {} ).get( int( box.cls[0].item() ) )
                                 if mapped_class_index is None:
+                                    # Ignore classes we do not know how to map back into the
+                                    # legacy BetaChip class list instead of corrupting indices.
                                     continue
                                 self.boxes_np[i][j] = (sstime,mapped_class_index,box.xyxy[0][0].item(),box.xyxy[0][1].item(),box.xyxy[0][2].item(),box.xyxy[0][3].item(),1,size)
                                 j = j+1
