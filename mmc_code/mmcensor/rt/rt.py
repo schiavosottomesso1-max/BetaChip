@@ -255,7 +255,7 @@ def _check_windows_power_plan():
     except Exception:
         return None
 
-def _query_total_vram_mb( timeout_s ):
+def _query_total_vram( timeout_s ):
     try:
         result = subprocess.run(
             [ 'nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits' ],
@@ -278,7 +278,7 @@ def _resolve_auto_model_profile( env, model_settings, perf_settings ):
     thresholds = dict( mmc_config.get_model_settings().get( 'auto-profile-vram-thresholds-gb', {} ) )
     thresholds.update( model_settings.get( 'auto-profile-vram-thresholds-gb', {} ) )
     timeout_s = float( perf_settings.get( 'vram-query-timeout-s', 0.8 ) )
-    total_vram_mb = _query_total_vram_mb( timeout_s )
+    total_vram_mb = _query_total_vram( timeout_s )
     if total_vram_mb is not None:
         if total_vram_mb >= int( thresholds[ mmc_const.model_profile_large ] * 1024 ):
             return mmc_const.model_profile_large
@@ -795,6 +795,7 @@ class mmc_detect_loop_class:
                     for hwnd in outs:
                         j=0
                         for size in outs[hwnd]:
+                            model_for_size = self.get_model_for_size( size )
                             for box in outs[hwnd][size]:
                                 raw_class_index = int( box.cls[0].item() )
                                 mapped_class_index = self.model_class_indices.get( size, {} ).get( raw_class_index )
@@ -803,7 +804,7 @@ class mmc_detect_loop_class:
                                     # legacy BetaChip class list instead of corrupting indices.
                                     unmapped_key = ( size, raw_class_index )
                                     if unmapped_key not in self._reported_unmapped_classes:
-                                        raw_class_name = getattr( self.get_model_for_size( size ), 'names', {} ).get( raw_class_index, raw_class_index )
+                                        raw_class_name = getattr( model_for_size, 'names', {} ).get( raw_class_index, raw_class_index )
                                         print( 'WARNING: unmapped model class %s at size %d was ignored.'%( raw_class_name, size ) )
                                         self._reported_unmapped_classes.add( unmapped_key )
                                     continue

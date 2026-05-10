@@ -131,12 +131,7 @@ model_profiles = {
         },
     }
 
-supported_model_profiles = [
-        model_profile_auto,
-        model_profile_small,
-        model_profile_medium,
-        model_profile_large,
-    ]
+supported_model_profiles = [ model_profile_auto ] + list( model_profiles.keys() )
 
 single_pass = 'single_pass'
 no_overlap  = 'no_overlap'
