@@ -31,10 +31,6 @@ _N_ROLLING = 120         # rolling buffer size for post-calibration re-calibrati
 _ROLLING_RECAL_EVERY = 20  # recalibrate delay every N new rolling samples
 _AUTO_RESET_EMA_ALPHA = 0.12   # EMA smoothing for auto-reset SYNC check (absorbs single-frame GPU spikes)
 _HUD_SYNC_EMA_ALPHA   = 0.20   # EMA smoothing for SYNC value shown in the HUD (cosmetic only)
-_DEFAULT_AUTO_PROFILE_VRAM_GB = {
-    mmc_const.model_profile_medium: 8,
-    mmc_const.model_profile_large: 12,
-}
 
 def _disable_windows_quick_edit():
     # Only targets the console STD_INPUT_HANDLE (-10) to disable Quick-Edit
@@ -279,7 +275,7 @@ def _resolve_auto_model_profile( env, model_settings, perf_settings ):
     if env in ( 'openvino', 'pytorch-cpu', 'directml' ):
         return mmc_const.model_profile_small
 
-    thresholds = dict( _DEFAULT_AUTO_PROFILE_VRAM_GB )
+    thresholds = dict( mmc_config.get_model_settings().get( 'auto-profile-vram-thresholds-gb', {} ) )
     thresholds.update( model_settings.get( 'auto-profile-vram-thresholds-gb', {} ) )
     timeout_s = float( perf_settings.get( 'vram-query-timeout-s', 0.8 ) )
     total_vram_mb = _query_total_vram_mb( timeout_s )
@@ -620,6 +616,7 @@ class mmc_detect_loop_class:
         # Track ONNX paths for 'cuda-onnx' env so we can swap the session after warmup.
         self._cuda_onnx_paths = {}
         self.model_class_indices = {}
+        self._reported_unmapped_classes = set()
 
         self.models = {}
         print( 'model profile requested: %s | active: %s'%( self.requested_model_profile, self.active_model_profile ) )
@@ -804,6 +801,11 @@ class mmc_detect_loop_class:
                                 if mapped_class_index is None:
                                     # Ignore classes we do not know how to map back into the
                                     # legacy BetaChip class list instead of corrupting indices.
+                                    unmapped_key = ( size, raw_class_index )
+                                    if unmapped_key not in self._reported_unmapped_classes:
+                                        raw_class_name = getattr( self.get_model_for_size( size ), 'names', {} ).get( raw_class_index, raw_class_index )
+                                        print( 'WARNING: unmapped model class %s at size %d was ignored.'%( raw_class_name, size ) )
+                                        self._reported_unmapped_classes.add( unmapped_key )
                                     continue
                                 self.boxes_np[i][j] = (sstime,mapped_class_index,box.xyxy[0][0].item(),box.xyxy[0][1].item(),box.xyxy[0][2].item(),box.xyxy[0][3].item(),1,size)
                                 j = j+1

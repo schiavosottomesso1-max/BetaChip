@@ -50,6 +50,7 @@ model_profiles = {
             'label': 'Small',
             'basename': '320n',
             'description': 'Fastest profile for CPU, DirectML, and low-VRAM systems.',
+            'default-net-sizes': [ 640 ],
             'fallback_profiles': [ model_profile_medium ],
             'classes': [
                 'FEMALE_GENITALIA_COVERED',
@@ -76,6 +77,7 @@ model_profiles = {
             'label': 'Medium',
             'basename': '640m',
             'description': 'Best default balance of quality, VRAM use, and latency.',
+            'default-net-sizes': [ 1280, 640 ],
             'fallback_profiles': [ model_profile_small ],
             'classes': [
                 'FEMALE_GENITALIA_COVERED',
@@ -104,6 +106,7 @@ model_profiles = {
             # so the large profile reuses 640m and relies on more aggressive sizing.
             'basename': '640m',
             'description': 'Highest-quality preset; uses the 640m family with more aggressive sizing.',
+            'default-net-sizes': [ 1280, 640, 2560 ],
             'fallback_profiles': [ model_profile_medium, model_profile_small ],
             'classes': [
                 'FEMALE_GENITALIA_COVERED',
@@ -141,6 +144,9 @@ no_overlap  = 'no_overlap'
 supported_sizes = [ 640, 1280, 1920, 2560 ]
 
 def normalize_model_profile( profile, default=model_profile_medium ):
+    default = str(default).strip().lower() if default is not None else model_profile_medium
+    if default not in supported_model_profiles:
+        default = model_profile_medium
     normalized = str(profile).strip().lower() if profile is not None else ''
     if normalized in supported_model_profiles:
         return normalized

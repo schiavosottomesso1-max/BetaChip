@@ -16,8 +16,6 @@ import mmcensor.const as mmc_const
 def get_net_sizes():
     model_settings = get_model_settings()
     default_profile = model_settings['default-profile']
-    if default_profile == mmc_const.model_profile_auto:
-        default_profile = mmc_const.model_profile_medium
     net_sizes = list( model_settings['profile-net-sizes'][ default_profile ] )
     #net_sizes = [ 1280 ]
     #net_sizes = [ 1280, 640 ]
@@ -28,9 +26,10 @@ def get_model_settings():
     model_settings = {
             'default-profile': mmc_const.model_profile_auto,
             'profile-net-sizes': {
-                mmc_const.model_profile_small:  [ 640 ],
-                mmc_const.model_profile_medium: [ 1280, 640 ],
-                mmc_const.model_profile_large:  [ 1280, 640, 2560 ],
+                mmc_const.model_profile_auto:   list( mmc_const.model_profiles[ mmc_const.model_profile_medium ][ 'default-net-sizes' ] ),
+                mmc_const.model_profile_small:  list( mmc_const.model_profiles[ mmc_const.model_profile_small ][ 'default-net-sizes' ] ),
+                mmc_const.model_profile_medium: list( mmc_const.model_profiles[ mmc_const.model_profile_medium ][ 'default-net-sizes' ] ),
+                mmc_const.model_profile_large:  list( mmc_const.model_profiles[ mmc_const.model_profile_large ][ 'default-net-sizes' ] ),
             },
             'auto-profile-vram-thresholds-gb': {
                 mmc_const.model_profile_medium: 8,

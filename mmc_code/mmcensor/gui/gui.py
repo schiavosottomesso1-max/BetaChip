@@ -324,8 +324,6 @@ class mmc_gui:
     def update_model_profile( self, evt=None ):
         profile = self.model_profile_var.get()
         self.rt.set_model_profile( profile )
-        if profile == mmc_const.model_profile_auto:
-            profile = mmc_const.model_profile_medium
         profile_sizes = self.rt.model_settings.get( 'profile-net-sizes', {} ).get( profile )
         if profile_sizes is not None:
             for i in range( len( mmc_const.supported_sizes ) ):
