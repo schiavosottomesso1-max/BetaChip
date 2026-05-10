@@ -31,6 +31,10 @@ _N_ROLLING = 120         # rolling buffer size for post-calibration re-calibrati
 _ROLLING_RECAL_EVERY = 20  # recalibrate delay every N new rolling samples
 _AUTO_RESET_EMA_ALPHA = 0.12   # EMA smoothing for auto-reset SYNC check (absorbs single-frame GPU spikes)
 _HUD_SYNC_EMA_ALPHA   = 0.20   # EMA smoothing for SYNC value shown in the HUD (cosmetic only)
+_DEFAULT_AUTO_PROFILE_VRAM_GB = {
+    mmc_const.model_profile_medium: 8,
+    mmc_const.model_profile_large: 12,
+}
 
 def _disable_windows_quick_edit():
     # Only targets the console STD_INPUT_HANDLE (-10) to disable Quick-Edit
@@ -275,13 +279,14 @@ def _resolve_auto_model_profile( env, model_settings, perf_settings ):
     if env in ( 'openvino', 'pytorch-cpu', 'directml' ):
         return mmc_const.model_profile_small
 
-    thresholds = model_settings.get( 'auto-profile-vram-thresholds-gb', {} )
+    thresholds = dict( _DEFAULT_AUTO_PROFILE_VRAM_GB )
+    thresholds.update( model_settings.get( 'auto-profile-vram-thresholds-gb', {} ) )
     timeout_s = float( perf_settings.get( 'vram-query-timeout-s', 0.8 ) )
     total_vram_mb = _query_total_vram_mb( timeout_s )
     if total_vram_mb is not None:
-        if total_vram_mb >= int( thresholds.get( mmc_const.model_profile_large, 12 ) * 1024 ):
+        if total_vram_mb >= int( thresholds[ mmc_const.model_profile_large ] * 1024 ):
             return mmc_const.model_profile_large
-        if total_vram_mb >= int( thresholds.get( mmc_const.model_profile_medium, 8 ) * 1024 ):
+        if total_vram_mb >= int( thresholds[ mmc_const.model_profile_medium ] * 1024 ):
             return mmc_const.model_profile_medium
         return mmc_const.model_profile_small
 
@@ -794,7 +799,8 @@ class mmc_detect_loop_class:
                         j=0
                         for size in outs[hwnd]:
                             for box in outs[hwnd][size]:
-                                mapped_class_index = self.model_class_indices.get( size, {} ).get( int( box.cls[0].item() ) )
+                                raw_class_index = int( box.cls[0].item() )
+                                mapped_class_index = self.model_class_indices.get( size, {} ).get( raw_class_index )
                                 if mapped_class_index is None:
                                     # Ignore classes we do not know how to map back into the
                                     # legacy BetaChip class list instead of corrupting indices.

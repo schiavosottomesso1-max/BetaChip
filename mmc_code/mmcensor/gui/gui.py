@@ -199,6 +199,16 @@ class mmc_gui:
 
         self.size_checks = []
         default_sizes = set( mmc_config.get_net_sizes() )
+        profile_help = []
+        for profile in mmc_const.supported_model_profiles:
+            if profile == mmc_const.model_profile_auto:
+                profile_help.append( 'auto=VRAM/backend' )
+            else:
+                profile_info = mmc_const.model_profiles[ profile ]
+                label = f"{profile}={profile_info['basename']}"
+                if profile == mmc_const.model_profile_large:
+                    label = f"{label} (quality)"
+                profile_help.append( label )
         chk_frame = tk.Frame( self.tab_realtime, bg=_BG )
         chk_frame.grid( row=2, column=0, sticky="w", padx=4, pady=2 )
         for i in range( len( mmc_const.supported_sizes ) ):
@@ -225,7 +235,7 @@ class mmc_gui:
         self.model_profile_combo.bind( "<<ComboboxSelected>>", self.update_model_profile )
         _lbl(
             model_frame,
-            text="auto=VRAM/backend, small=320n, medium=640m, large=640m (quality)",
+            text=", ".join( profile_help ),
         ).grid( row=0, column=2, sticky="w" )
 
         ################################
