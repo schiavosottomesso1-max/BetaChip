@@ -492,14 +492,14 @@ class mmc_gui:
 
     # ── Telemetry tab ──────────────────────────────────────────────────
     def _build_telemetry_tab( self ):
-        """Build the Telemetry tab: HUD toggle and OBS mode toggle."""
+        """Build the Telemetry tab: HUD toggle, OBS mode toggle, and auto-reset controls."""
         outer = tk.Frame( self.tab_telemetry, bg=_BG )
         outer.grid( row=0, column=0, sticky="nsew", padx=16, pady=12 )
 
         self._hud_var = tk.IntVar( value=int( self.rt.hud_enabled ) )
         _chk( outer, text="Show overlay HUD (on cv2 windows)",
               variable=self._hud_var, command=self._toggle_hud ).grid(
-            row=0, column=0, sticky="w", padx=4 )
+            row=0, column=0, columnspan=3, sticky="w", padx=4 )
 
         self._obs_var = tk.IntVar( value=int( self.rt.obs_mode ) )
         _chk( outer,
@@ -507,13 +507,75 @@ class mmc_gui:
                    "(use OBS Window Capture → select 'BetaChip_REC_…' to record the censored output)",
               variable=self._obs_var, command=self._toggle_obs_mode,
               justify="left" ).grid(
-            row=1, column=0, sticky="w", padx=4, pady=(6, 0) )
+            row=1, column=0, columnspan=3, sticky="w", padx=4, pady=(6, 0) )
+
+        # ── Auto-reset controls ────────────────────────────────────────────
+        sep = tk.Frame( outer, bg=_ROSE_GOLD, height=1 )
+        sep.grid( row=2, column=0, columnspan=3, sticky="ew", pady=(12, 6) )
+
+        _auto_reset_enabled = self.rt.auto_reset_sync_s > 0
+        self._auto_reset_var = tk.IntVar( value=int( _auto_reset_enabled ) )
+        _chk( outer, text="Enable auto-reset (triggers when sync stays bad)",
+              variable=self._auto_reset_var, command=self._toggle_auto_reset ).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=4 )
+
+        _lbl( outer, text="Auto-reset timeout (seconds):" ).grid(
+            row=4, column=0, sticky="w", padx=4, pady=(4, 0) )
+        self._auto_reset_seconds_var = tk.StringVar(
+            value=str( int( self.rt.auto_reset_sync_s ) if _auto_reset_enabled else 30 ) )
+        self._auto_reset_entry = tk.Entry(
+            outer, textvariable=self._auto_reset_seconds_var, width=6,
+            bg=_LIST_BG, fg=_TEXT_DARK, font=_FONT_NORM, relief="flat",
+            highlightthickness=1, highlightcolor=_ACCENT,
+            insertbackground=_TEXT_DARK )
+        self._auto_reset_entry.grid( row=4, column=1, sticky="w", padx=4, pady=(4, 0) )
+        _btn( outer, text="Apply", padx=6, pady=2,
+              command=self._apply_auto_reset ).grid( row=4, column=2, padx=4, pady=(4, 0) )
+
+        # ── Manual reset button ────────────────────────────────────────────
+        sep2 = tk.Frame( outer, bg=_ROSE_GOLD, height=1 )
+        sep2.grid( row=5, column=0, columnspan=3, sticky="ew", pady=(12, 6) )
+
+        _lbl( outer, text="Manual reset — reinitialises the capture/inference pipeline:" ).grid(
+            row=6, column=0, columnspan=3, sticky="w", padx=4 )
+        self._telemetry_reset_button = _btn(
+            outer, text="Reset Now",
+            command=self._telemetry_reset_pushed )
+        self._telemetry_reset_button.grid( row=7, column=0, sticky="w", padx=4, pady=(4, 0) )
 
     def _toggle_hud( self ):
         self.rt.hud_enabled = bool( self._hud_var.get() )
 
     def _toggle_obs_mode( self ):
         self.rt.obs_mode = bool( self._obs_var.get() )
+
+    def _toggle_auto_reset( self ):
+        if self._auto_reset_var.get():
+            self._apply_auto_reset()
+        else:
+            self.rt.auto_reset_sync_s = 0
+
+    def _apply_auto_reset( self ):
+        try:
+            value = float( self._auto_reset_seconds_var.get() )
+        except ValueError:
+            return
+        if value <= 0:
+            self.rt.auto_reset_sync_s = 0
+            self._auto_reset_var.set(0)
+        else:
+            self.rt.auto_reset_sync_s = value
+            self._auto_reset_var.set(1)
+
+    def _telemetry_reset_pushed( self ):
+        self._telemetry_reset_button.config( state='disabled', text='⏳ Resetting…' )
+        t = threading.Thread( target=self._telemetry_reset_async, daemon=True )
+        t.start()
+
+    def _telemetry_reset_async( self ):
+        self.rt.reset_runtime()
+        self.root.after( 0, lambda: self._telemetry_reset_button.config(
+            state='normal', text='Reset Now' ) )
 
     def on_close( self ):
         self.rt.shutdown()
